@@ -773,11 +773,13 @@ def connect_lines(segs: list[Segment]) -> list[Segment]:
     # which joints to close, and the whole number of beats each section spans
     n = [0] * m
     joined = [False] * m
+    pinned = [False] * m  # knots a rounded grid lands on: moving them would open that joint again
     for i in range(m - 1):
         x = (segs[i + 1].time - segs[i].time) / segs[i].beat_length
         gap = abs(x - round(x)) * segs[i].beat_length
         if gap < 1.0 and is_round(segs[i].bpm):
-            continue  # snap_bpm already put the next line where this rounded grid lands: keep the round BPM
+            pinned[i + 1] = True  # snap_bpm already put the next line where this rounded grid lands: keep the round BPM
+            continue
         if round(x) >= 1 and gap <= CONNECT_MAX_MS and gap / round(x) <= CONNECT_MAX_MS_PER_BEAT:
             n[i], joined[i] = int(round(x)), True
     # joint least squares per chain of joined sections: the knots move so both neighbours'
@@ -788,26 +790,36 @@ def connect_lines(segs: list[Segment]) -> list[Segment]:
         j = i
         while j < m - 1 and joined[j]:
             j += 1
-        if j > i:  # sections i..j-1 are joined; knots i..j-1 move, knot j (start of a section
-            # whose own grid runs on unchecked) stays where it is
+        free = [a for a in range(i, j) if not pinned[a]]
+        if j > i and free:  # sections i..j-1 are joined; knots i..j-1 move (unless pinned), knot j
+            # (start of a section whose own grid runs on unchecked) stays where it is
+            col = {a: c for c, a in enumerate(free)}
             rows, rhs = [], []
             for a in range(i, j):
                 for k in range(n[a] + 1):  # section a's own beats, from its knot to the next
-                    r = np.zeros(j - i)
+                    r = np.zeros(len(free))
                     target = segs[a].time + k * segs[a].beat_length
-                    r[a - i] += 1 - k / n[a]
-                    if a + 1 < j:
-                        r[a + 1 - i] += k / n[a]
-                    else:
-                        target -= k / n[a] * segs[j].time
+                    for knot, wgt in ((a, 1 - k / n[a]), (a + 1, k / n[a])):
+                        if knot in col:
+                            r[col[knot]] += wgt
+                        else:  # a fixed knot: chain end or pinned
+                            target -= wgt * segs[knot].time
                     rows.append(r)
                     rhs.append(target)
             sol, *_ = np.linalg.lstsq(np.array(rows), np.array(rhs), rcond=None)
-            T[i:j] = list(sol)
+            for a, v in zip(free, sol):
+                T[a] = float(v)
         i = j + 1
     t = [float(round(x)) for x in T]  # osu! stores whole ms
-    return [Segment(t[i], (t[i + 1] - t[i]) / n[i] if joined[i] else segs[i].beat_length, segs[i].meter)
-            for i in range(m)]
+    L = [(t[i + 1] - t[i]) / n[i] if joined[i] else segs[i].beat_length for i in range(m)]
+    # last guarantee against double barlines: whatever the steps above left 0.5-15 ms off (a section
+    # shifted by its rounded neighbour, a short line bending more than 2 ms per beat), the earlier
+    # section's BPM is fitted so its grid lands on the next line, which keeps its own phase
+    for i in range(m - 1):
+        k = max(1, round((t[i + 1] - t[i]) / L[i]))
+        if 0.5 <= abs(t[i + 1] - (t[i] + k * L[i])) <= CONNECT_MAX_MS:
+            L[i] = (t[i + 1] - t[i]) / k
+    return [Segment(t[i], L[i], segs[i].meter) for i in range(m)]
 
 
 SNAP_STEPS = (1.0, 0.5, 0.25, 0.1)  # BPM roundings mappers use, roundest first
