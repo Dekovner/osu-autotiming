@@ -296,6 +296,8 @@ HYBRID_MIN_RUN = 4  # beats: shorter switches to the tracker are noise
 # a whole run of tracked beats must also win on aggregate, or it is wobble (e.g. a quiet outro), not tempo
 RUN_MIN_GAIN = float(_env("RUN_MIN_GAIN", "0.4"))
 RUN_MIN_BEATS = int(_env("RUN_MIN_BEATS", "16"))
+SWITCH_TOL_MS = float(_env("SWITCH_TOL_MS", "10"))  # grids this close may hand over to each other
+SWITCH_MAX_EXTEND = int(_env("SWITCH_MAX_EXTEND", "16"))  # beats a tracked run may grow to reach such a point
 
 
 def _quarters(beat_times: np.ndarray) -> np.ndarray:
@@ -366,6 +368,27 @@ def hybrid(o, steady: list[Segment], tracked: Beats, margin=HYBRID_MARGIN, reali
         if k2 - k < RUN_MIN_BEATS or gain < RUN_MIN_GAIN:
             use_t[k:k2] = False
         k = k2
+    # switch sources only where the two grids agree: a run ending while the tracker and the
+    # steady grid are far apart would put a phase jump mid-phrase (e.g. the last bars of a
+    # tempo ramp, where onsets are too sparse to back either grid), so extend it until they meet
+    tj = np.clip(np.searchsorted(tracked.times, sb), 1, len(tracked.times) - 1)
+    gap = np.minimum(np.abs(sb - tracked.times[tj - 1]), np.abs(sb - tracked.times[tj]))
+    k = 0
+    while k < len(use_t):
+        if not use_t[k]:
+            k += 1
+            continue
+        k2 = k
+        while k2 < len(use_t) and use_t[k2]:
+            k2 += 1
+        e = k2
+        while e < len(use_t) and e - k2 < SWITCH_MAX_EXTEND and gap[e] > SWITCH_TOL_MS and not use_t[e]:
+            e += 1
+        b = k
+        while b > 0 and k - b < SWITCH_MAX_EXTEND and gap[b - 1] > SWITCH_TOL_MS and not use_t[b - 1]:
+            b -= 1
+        use_t[b:e] = True
+        k = e
 
     out_t, out_s, k = [], [], 0
     mids = (tracked.times[:-1] + tracked.times[1:]) / 2
