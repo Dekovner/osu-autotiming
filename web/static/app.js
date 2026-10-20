@@ -10,6 +10,7 @@ const $ = (id) => document.getElementById(id);
 const API = "api/analyze";
 const SNAP_COLORS = { 1: "#ecebf1", 2: "#f04b3c", 3: "#b07ad8", 4: "#4598e0", 6: "#d79be8", 8: "#e8c547" };
 const LINE_HIT_PX = 7;
+const MAGNET_PX = 10;  // the grid pulls a dragged line or the playhead only this close
 
 let actx = null, buffer = null, musicGain = null, clickGain = null;
 let duration = 0, decodeShift = 0, AUDIO_LAG = 20.4;
@@ -38,11 +39,11 @@ function lineAt(t) {
   return i;
 }
 
-// grid ticks in [a, b): {t, level} level = 1 (bar), 2 (beat) or the divisor index of a sub-beat tick
-function ticks(a, b, div) {
+// grid ticks in [a, b): {t, level} level 0 = bar, 1 = beat, else the divisor of a sub-beat tick
+function ticks(a, b, div, src = lines) {
   const out = [];
-  for (let i = 0; i < lines.length; i++) {
-    const l = lines[i], end = i + 1 < lines.length ? lines[i + 1].time : Infinity;
+  for (let i = 0; i < src.length; i++) {
+    const l = src[i], end = i + 1 < src.length ? src[i + 1].time : Infinity;
     const lo = Math.max(a, i === 0 ? -Infinity : l.time), hi = Math.min(b, end);
     if (lo >= hi) continue;
     const step = l.beat_length / div;
@@ -59,6 +60,19 @@ function ticks(a, b, div) {
 }
 const gcd = (a, b) => (b ? gcd(b, a % b) : Math.abs(a));
 
+// magnet: t moves to the nearest grid tick (current divisor) if one is within MAGNET_PX on screen.
+// A dragged line snaps to the grid of the other lines, not its own (which moves with it).
+function snap(t, e, skip = null) {
+  if (!$("magnet").checked || (e && e.altKey) || !lines.length) return t;
+  const r = (MAGNET_PX / $("wave").clientWidth) * view.span;
+  const src = skip ? lines.filter((l) => l !== skip) : lines;
+  let best = t, bd = r;
+  for (const tk of ticks(t - r, t + r, div(), src)) {
+    if (Math.abs(tk.t - t) <= bd) { bd = Math.abs(tk.t - t); best = tk.t; }
+  }
+  return best;
+}
+
 // how far the next line sits off this line's grid (a double barline in the editor if not 0)
 function joint(i) {
   if (i < 0 || i + 1 >= lines.length) return null;
@@ -67,6 +81,10 @@ function joint(i) {
   const land = a.time + n * a.beat_length;
   return { n, land, off: b.time - land };
 }
+
+// 0.5-15 ms off is a slip that shows as a double barline; further off (a quarter, half a beat)
+// is a deliberate phase reset, like the detector's CONNECT_MAX_MS
+const accidental = (j) => j && Math.abs(j.off) >= 0.5 && Math.abs(j.off) <= 15;
 
 // ---------- state changes ----------
 
@@ -98,12 +116,15 @@ function edit(fn) {
   refresh();
 }
 
-function addLineAt(t) {
+function addLineAt(t, e = null) {
   if (!lines.length) return;
   const base = lines[lineAt(t)];
-  const k = Math.round((t - base.time) / base.beat_length);
-  const time = Math.round(base.time + k * base.beat_length);  // on the current grid: no double barline
-  if (lines.some((l) => Math.abs(l.time - time) < 1)) return;
+  let time = Math.round(snap(t, e));  // near the grid: on it (no double barline); else where asked
+  if (lines.some((l) => Math.abs(l.time - time) < 1)) time = Math.round(t);
+  if (lines.some((l) => Math.abs(l.time - time) < 1)) {
+    status("there is already a red line at the playhead: click the waveform where the new one should go");
+    return;
+  }
   commit();
   const l = { time, beat_length: base.beat_length, meter: base.meter };
   lines = [...lines, l].sort((x, y) => x.time - y.time);
@@ -141,7 +162,7 @@ function renderList() {
     const li = document.createElement("li");
     if (i === sel) li.className = "on";
     const j = joint(i);
-    const warn = j && Math.abs(j.off) >= 0.5 ? `next line ${j.off > 0 ? "+" : ""}${j.off.toFixed(1)} ms off grid` : "";
+    const warn = accidental(j) ? `next line ${j.off > 0 ? "+" : ""}${j.off.toFixed(1)} ms off grid` : "";
     li.innerHTML = `<span class="n">${i + 1}</span><span class="bpm">${fmtBpm(bpmOf(l))}</span><span class="t">${fmtClock(l.time)}</span><span class="warn">${warn}</span>`;
     li.onclick = () => { select(i); reveal(l.time); };
     ol.appendChild(li);
@@ -156,7 +177,7 @@ function renderSel() {
   if (document.activeElement !== $("f-bpm")) $("f-bpm").value = fmtBpm(bpmOf(l));
   if (document.activeElement !== $("f-meter")) $("f-meter").value = l.meter;
   const j = joint(sel), p = $("joint");
-  p.hidden = !j || Math.abs(j.off) < 0.5;
+  p.hidden = !accidental(j);
   if (!p.hidden) {
     p.innerHTML = `next red line is <b>${j.off > 0 ? "+" : ""}${j.off.toFixed(1)} ms</b> off this grid (a double barline). ` +
       `<button id="fit">fit this BPM</button> <button id="movenext">move next line</button>`;
@@ -254,7 +275,7 @@ function draw() {
     g.fillStyle = "#ecebf1";
     g.fillText(`${fmtBpm(bpmOf(l))} · ${l.meter}/4`, x + 5, 22);
     const j = joint(i);
-    if (j && Math.abs(j.off) >= 0.5 && j.land > t0 && j.land < t1) {  // where this grid wanted the next line
+    if (accidental(j) && j.land > t0 && j.land < t1) {  // where this grid wanted the next line
       const xl = xOf(j.land, w);
       g.strokeStyle = "#e8c547"; g.setLineDash([3, 3]); g.lineWidth = 1;
       g.beginPath(); g.moveTo(xl, 0); g.lineTo(xl, h); g.stroke(); g.setLineDash([]);
@@ -415,6 +436,24 @@ function status(msg, err = false) {
   p.classList.toggle("err", err);
 }
 
+// upload, then ask once a second where the song is: in the queue, being analysed, or done
+async function analyseOnServer(form, name) {
+  const asJson = async (r) => r.json().catch(() => ({ error: `server error ${r.status}` }));
+  let job = await asJson(await fetch(API, { method: "POST", body: form }));
+  const id = job.job;
+  while (!job.error && job.status !== "done") {
+    if (job.status === "queued") {
+      status(job.ahead > 0 ? `in the queue: ${job.ahead} song${job.ahead > 1 ? "s" : ""} ahead of yours`
+        : `you're next (${job.running} song${job.running === 1 ? "" : "s"} being analysed)`);
+    } else {
+      status(`analysing ${name}… (a few seconds per minute of audio)`);
+    }
+    await new Promise((r) => setTimeout(r, 1000));
+    job = await asJson(await fetch(`api/job/${id}`));
+  }
+  return job;
+}
+
 async function load(file) {
   if (!file) return;
   fileName = file.name;
@@ -427,8 +466,7 @@ async function load(file) {
   const decoding = file.arrayBuffer().then((ab) => actx.decodeAudioData(ab));
   let res;
   try {
-    const r = await fetch(API, { method: "POST", body: form });
-    res = await r.json().catch(() => ({ error: `server error ${r.status}` }));
+    res = await analyseOnServer(form, file.name);
   } catch (e) {
     res = { error: "can't reach the server" };
   }
@@ -524,7 +562,7 @@ wave.addEventListener("pointerdown", (e) => {
   if (hit >= 0) {
     select(hit);
     commit();
-    drag = { kind: "line", line: lines[hit], dx: e.offsetX - xOf(lines[hit].time, w) };
+    drag = { kind: "line", line: lines[hit], dx: e.offsetX - xOf(lines[hit].time, w), x0: e.offsetX, moved: false };
   } else {
     drag = { kind: "pan", x0: e.offsetX, start0: view.start, moved: false };
   }
@@ -536,7 +574,9 @@ wave.addEventListener("pointermove", (e) => {
     return;
   }
   if (drag.kind === "line") {
-    drag.line.time = Math.round(tOf(e.offsetX - drag.dx, w));
+    if (Math.abs(e.offsetX - drag.x0) > 3) drag.moved = true;
+    if (!drag.moved) return;
+    drag.line.time = Math.round(snap(tOf(e.offsetX - drag.dx, w), e, drag.line));
     lines.sort((a, b) => a.time - b.time);
     sel = lines.indexOf(drag.line);
     $("text").value = timingText();
@@ -549,11 +589,13 @@ wave.addEventListener("pointermove", (e) => {
   }
 });
 wave.addEventListener("pointerup", (e) => {
-  if (drag && drag.kind === "pan" && !drag.moved) seek(tOf(e.offsetX, wave.clientWidth));
-  if (drag && drag.kind === "line") refresh();
+  if (drag && !drag.moved) {  // a click, not a drag: seek (a click on a red line seeks to it)
+    if (drag.kind === "line") { past.pop(); seek(drag.line.time); } else seek(snap(tOf(e.offsetX, wave.clientWidth), e));
+  }
+  if (drag && drag.kind === "line" && drag.moved) refresh();
   drag = null;
 });
-wave.addEventListener("dblclick", (e) => addLineAt(tOf(e.offsetX, wave.clientWidth)));
+wave.addEventListener("dblclick", (e) => addLineAt(tOf(e.offsetX, wave.clientWidth), e));
 
 const ov = $("overview");
 const ovSeek = (e) => { const t = (e.offsetX / ov.clientWidth) * duration; view.start = t - view.span / 2; seek(t); };
