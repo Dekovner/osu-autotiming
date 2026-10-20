@@ -664,12 +664,12 @@ def detect_full(o: Onsets, pcm=None, sr=None, downbeat_ms: float | None = None) 
     # a mapper who knows where "1" is (osu! time) overrides the guess
     anchor = downbeat_anchor(o, steady, ch) if downbeat_ms is None else downbeat_ms - OSU_OFFSET_MS
     if o.profile is None or o.times[-1] - o.times[0] < TRACK_MIN_MS:
-        return connect_lines(first_on_downbeat(steady, anchor, ch, o))
+        return snap_bpm(connect_lines(first_on_downbeat(steady, anchor, ch, o)), o.times[-1] + OSU_OFFSET_MS)
     main_L = main_beat_length(o, steady)
     # the tracker expects each section at the octave the steady lines chose there
     secs = align_octave(fine_sections(o, main_L), steady)
     tracked = track_beats(o, secs, probs=beat_prob(o, main_L))
-    return connect_lines(first_on_downbeat(combine(o, steady, tracked, anchor), anchor, ch, o))
+    return snap_bpm(connect_lines(first_on_downbeat(combine(o, steady, tracked, anchor), anchor, ch, o)), o.times[-1] + OSU_OFFSET_MS)
 
 
 CONNECT_MAX_MS = 15.0  # a line further off the previous grid is a real reset, not a fitting gap
@@ -726,6 +726,44 @@ def connect_lines(segs: list[Segment]) -> list[Segment]:
     t = [float(round(x)) for x in T]  # osu! stores whole ms
     return [Segment(t[i], (t[i + 1] - t[i]) / n[i] if joined[i] else segs[i].beat_length, segs[i].meter)
             for i in range(m)]
+
+
+SNAP_STEPS = (1.0, 0.5, 0.25, 0.1)  # BPM roundings mappers use, roundest first
+SNAP_MAX_MS = float(os.environ.get("SNAP_MAX_MS", "5"))  # how far a rounded grid may drift from the fitted one
+# (ranked: exact mapper BPM on 92% of single-BPM maps at 5 ms, coverage -1 point; a fitted 150.009 is noise)
+
+
+def snap_bpm(segs: list[Segment], t_end: float) -> list[Segment]:
+    """Round each section's BPM to the roundest value the audio allows (150.009 -> 150).
+
+    Songs are produced at round tempos, so the last decimals are measurement
+    noise, and mappers would retype them anyway. A rounding is taken when the
+    rounded grid stays within SNAP_MAX_MS of the fitted one over the section
+    (the first section may re-centre its offset to halve the drift). Line times
+    stay whole ms, and each next line moves to where the rounded grid lands, so
+    sections remain connected.
+    """
+    segs = sorted(segs, key=lambda s: s.time)
+    out, prev_end = [], None
+    for i, s in enumerate(segs):
+        start = s.time if prev_end is None else prev_end
+        nxt = segs[i + 1].time if i + 1 < len(segs) else None
+        n = round((nxt - s.time) / s.beat_length) if nxt is not None else max(1, int((t_end - start) / s.beat_length))
+        L = s.beat_length
+        for step in SNAP_STEPS:
+            c = round(s.bpm / step) * step
+            Lc = 60000.0 / c
+            drift = n * (Lc - L)
+            shift = -drift / 2 if i == 0 else 0.0  # only the first line may move to centre the error
+            if abs(drift + shift) <= SNAP_MAX_MS and abs(shift) <= SNAP_MAX_MS:
+                L, start = Lc, round(start + shift)
+                break
+        out.append(Segment(float(start), L, s.meter))
+        if nxt is not None:
+            # connected lines: the next one goes where this grid lands, unless that is a real reset
+            land = start + n * L
+            prev_end = float(round(land)) if abs(land - nxt) <= CONNECT_MAX_MS else float(round(nxt))
+    return out
 
 
 def first_on_downbeat(segs: list[Segment], anchor: float | None, ch, o: Onsets) -> list[Segment]:
