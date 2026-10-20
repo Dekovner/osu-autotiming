@@ -16,9 +16,9 @@ from numba import njit
 
 from .grid import Segment
 
-FPS = 100  # tracker frame rate; beat times are refined to onsets afterwards
+FPS = int(__import__("os").environ.get("TRACK_FPS", "100"))  # tracker frame rate; beats are refined to onsets after
 OBS_LAMBDA = 16.0  # how much a beat frame prefers onset activity (madmom's observation lambda)
-TRANSITION_LAMBDA = 60.0  # tempo-change stiffness: exp(-lambda * |ratio - 1|)
+TRANSITION_LAMBDA = float(__import__("os").environ.get("TRACK_TLAMBDA", "60"))  # tempo-change stiffness: exp(-lambda * |ratio - 1|)
 TEMPO_PRIOR = 100.0  # per-beat cost of log(interval / section interval)^2: 10% off ~ 1 nat, 30% ~ 7
 
 
@@ -367,6 +367,67 @@ def hybrid(o, steady: list[Segment], tracked: Beats, margin=HYBRID_MARGIN) -> Be
     return Beats(times[keep], sup[keep])
 
 
+SMOOTH_LAMBDA = float(__import__("os").environ.get("TRACK_SMOOTH", "30"))  # stiffness of the tempo curve
+SMOOTH_HUBER_MS = 4.0  # second differences beyond this count linearly: real tempo jumps survive
+
+
+def smooth_beats(o, skeleton: Beats, lam: float = SMOOTH_LAMBDA, weights=None) -> Beats:
+    """Beat times from a smooth tempo curve fitted through every onset, not snapped to onsets.
+
+    The skeleton (tracked beats) only says which beat each onset belongs to and
+    at which quarter (beat, 1/4, 1/2, 3/4). The beat times T_k are then the least
+    squares solution of: every such onset lies on its quarter position
+    (linear interpolation between T_k and T_k+1), plus lam * (T_k+1 - 2 T_k + T_k-1)^2
+    so tempo changes smoothly; that penalty is Huber-weighted, so a genuine jump
+    costs little. A third of mappers' beats in rubato songs have no onset at
+    all; this fills them from their neighbours, as a mapper would.
+    """
+    from scipy.sparse import coo_matrix, diags, vstack
+    from scipy.sparse.linalg import spsolve
+
+    from .detect import weights as onset_weights
+
+    b = skeleton.times
+    n = len(b)
+    if n < 4:
+        return skeleton
+    t = o.times
+    w_on = onset_weights(o) if weights is None else weights
+    T = b.astype(float).copy()
+    level_w = np.array([1.0, 0.3, 0.6, 0.3])
+    huber = np.ones(n - 2)
+    for tol in (20.0, 12.0, 8.0, 6.0):
+        k = np.clip(np.searchsorted(T, t, side="right") - 1, 0, n - 2)
+        frac = (t - T[k]) / (T[k + 1] - T[k])
+        inside = (frac >= -0.125) & (frac < 1.125)
+        q = np.round(frac * 4) / 4
+        # quarters past the end of a beat belong to the next beat's start
+        nxt = q >= 1
+        k2 = np.where(nxt, np.minimum(k + 1, n - 2), k)
+        q2 = np.where(nxt, q - 1, q)
+        pred = T[k2] + q2 * (T[k2 + 1] - T[k2])
+        resid = t - pred
+        keep = inside & (np.abs(resid) < tol) & (q2 >= 0)
+        if keep.sum() < 8:
+            break
+        kk, qq = k2[keep], q2[keep]
+        ww = w_on[keep] * level_w[(np.round(qq * 4).astype(int)) % 4] / (1 + (resid[keep] / 3) ** 2)
+        rows = np.arange(keep.sum())
+        A = coo_matrix((np.r_[1 - qq, qq], (np.r_[rows, rows], np.r_[kk, kk + 1])), shape=(keep.sum(), n)).tocsr()
+        Wd = diags(ww)
+        D2 = diags([np.ones(n - 2), -2 * np.ones(n - 2), np.ones(n - 2)], [0, 1, 2], shape=(n - 2, n))
+        scale = np.median(ww) if len(ww) else 1.0
+        H = diags(huber * lam * scale)
+        lhs = (A.T @ Wd @ A + D2.T @ H @ D2 + diags(np.full(n, 1e-6 * scale))).tocsc()
+        rhs = A.T @ (ww * t[keep]) + 1e-6 * scale * T
+        T = spsolve(lhs, rhs)
+        d2 = D2 @ T
+        huber = np.minimum(1.0, SMOOTH_HUBER_MS / np.maximum(np.abs(d2), 1e-9))
+        if np.any(np.diff(T) <= 0):  # degenerate solve: keep the skeleton
+            return skeleton
+    return Beats(T, np.ones(n, bool))
+
+
 def track_beats(o, sections: list[Segment], probs: np.ndarray | None = None) -> Beats:
     """Beats tracked in one pass over the whole song, expecting each section's tempo in its span.
 
@@ -385,7 +446,8 @@ def track_beats(o, sections: list[Segment], probs: np.ndarray | None = None) -> 
     frames = viterbi_beats(act, lo, hi, prior_interval=expected)
     if len(frames) < 2:
         return Beats(np.zeros(0), np.zeros(0, bool))
-    return refine(frames * frame_ms + frame_ms / 2, o, weights=None if probs is None else probs * o.strength)
+    skeleton = refine(frames * frame_ms + frame_ms / 2, o, weights=None if probs is None else probs * o.strength)
+    return smooth_beats(o, skeleton) if SMOOTH_LAMBDA > 0 else skeleton
 
 
 def track(o, sections: list[Segment], line_cost=60.0, sigma_ms=2.5) -> tuple[Beats, list[Segment]]:

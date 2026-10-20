@@ -48,7 +48,7 @@ def tracker_key() -> str:
 
     knobs = {k: getattr(T, k) for k in ("FPS", "OBS_LAMBDA", "TRANSITION_LAMBDA", "TEMPO_PRIOR", "SPAN",
                                         "FINE_WIN_MS", "FINE_HOP_MS", "SECTION_TOL", "FINE_RANGE", "LOW_MIX",
-                                        "ACT_SOURCE", "PROB_STRENGTH_POW")}
+                                        "ACT_SOURCE", "PROB_STRENGTH_POW", "SMOOTH_LAMBDA", "SMOOTH_HUBER_MS")}
     return hashlib.md5(json.dumps(knobs, sort_keys=True).encode()).hexdigest()[:8]
 
 
