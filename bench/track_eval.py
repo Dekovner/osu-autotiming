@@ -47,7 +47,8 @@ def tracker_key() -> str:
     from autotiming import track as T
 
     knobs = {k: getattr(T, k) for k in ("FPS", "OBS_LAMBDA", "TRANSITION_LAMBDA", "TEMPO_PRIOR", "SPAN",
-                                        "FINE_WIN_MS", "FINE_HOP_MS", "SECTION_TOL", "FINE_RANGE", "LOW_MIX")}
+                                        "FINE_WIN_MS", "FINE_HOP_MS", "SECTION_TOL", "FINE_RANGE", "LOW_MIX",
+                                        "ACT_SOURCE", "PROB_STRENGTH_POW")}
     return hashlib.md5(json.dumps(knobs, sort_keys=True).encode()).hexdigest()[:8]
 
 
@@ -62,7 +63,15 @@ def compute_beats(it):
         coarse = choose_octave(o, _detect_raw(o))
         ends = [s.time for s in coarse[1:]] + [o.times[-1]]
         main_L = coarse[int(np.argmax([e - s.time for s, e in zip(coarse, ends)]))].beat_length
-        b = track_beats(o, fine_sections(o, main_L))
+        probs = None
+        from autotiming import track as T
+        if T.ACT_SOURCE == "prob":  # cross-fitted: from a model that never saw this song
+            key = it["id"].replace("/", "__")
+            cf = np.load(DATA / "beatprob" / "crossfit.npz")
+            idx = np.load(DATA / "beatprob" / (key + ".npz"))["idx"]
+            probs = np.zeros(len(o.times))
+            probs[idx] = cf[key]
+        b = track_beats(o, fine_sections(o, main_L), probs=probs)
         np.savez(beats_file(it["id"]), times=b.times, supported=b.supported, secs=time.time() - t0)
         return None
     except Exception:

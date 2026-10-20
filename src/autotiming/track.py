@@ -32,6 +32,21 @@ class Beats:
 LOW_MIX = float(__import__("os").environ.get("TRACK_LOW_MIX", "0.0"))
 
 
+ACT_SOURCE = __import__("os").environ.get("TRACK_ACT", "flux")  # "flux" or "prob" (beat probability per onset)
+PROB_STRENGTH_POW = 0.3  # beat probability x (relative strength)^this: loud beats still count a bit more
+
+
+def prob_activation(o, probs: np.ndarray, fps=FPS) -> np.ndarray:
+    """Activation from per-onset beat probabilities: a spike at each onset, max-pooled per frame."""
+    frame_ms = 1000.0 / fps
+    n = int(len(o.env) * o.hop_ms / frame_ms)
+    rel = np.clip(o.strength / (np.percentile(o.strength, 99) + 1e-9), 0, 1) ** PROB_STRENGTH_POW
+    a = np.zeros(n)
+    f = np.clip((o.times / frame_ms).astype(int), 0, n - 1)
+    np.maximum.at(a, f, probs * rel)
+    return a * 0.98 + 0.01
+
+
 def activation(o, fps=FPS, low_mix=None) -> np.ndarray:
     """Beat-ish activity per tracker frame in [0, 1].
 
@@ -110,9 +125,9 @@ def viterbi_beats(act: np.ndarray, min_interval: int, max_interval: int, prior_i
     return np.array(beat_frames[::-1])
 
 
-def refine(beat_ms: np.ndarray, o, tol_frac=0.15, tol_ms=25.0) -> Beats:
+def refine(beat_ms: np.ndarray, o, tol_frac=0.15, tol_ms=25.0, weights=None) -> Beats:
     """Snap each beat to the strongest nearby onset; beats with none stay where the tracker put them."""
-    t, w = o.times, o.strength
+    t, w = o.times, (o.strength if weights is None else weights)
     out, sup = beat_ms.astype(float).copy(), np.zeros(len(beat_ms), bool)
     ivl = np.diff(beat_ms, prepend=beat_ms[0] - (beat_ms[1] - beat_ms[0] if len(beat_ms) > 1 else 500))
     for k, b in enumerate(beat_ms):
@@ -324,13 +339,13 @@ def hybrid(o, steady: list[Segment], tracked: Beats, margin=HYBRID_MARGIN) -> Be
     return Beats(times[keep], sup[keep])
 
 
-def track_beats(o, sections: list[Segment]) -> Beats:
+def track_beats(o, sections: list[Segment], probs: np.ndarray | None = None) -> Beats:
     """Beats tracked in one pass over the whole song, expecting each section's tempo in its span.
 
     One continuous path matters: tracking sections separately lets the phase be
     re-chosen at every seam, so steady songs flip between beat and offbeat.
     """
-    act = activation(o)
+    act = activation(o) if probs is None else prob_activation(o, probs)
     frame_ms = 1000.0 / FPS
     secs = sorted(sections, key=lambda s: s.time)
     starts = np.array([0] + [int(s.time / frame_ms) for s in secs[1:]])
@@ -342,7 +357,7 @@ def track_beats(o, sections: list[Segment]) -> Beats:
     frames = viterbi_beats(act, lo, hi, prior_interval=expected)
     if len(frames) < 2:
         return Beats(np.zeros(0), np.zeros(0, bool))
-    return refine(frames * frame_ms + frame_ms / 2, o)
+    return refine(frames * frame_ms + frame_ms / 2, o, weights=None if probs is None else probs * o.strength)
 
 
 def track(o, sections: list[Segment], line_cost=60.0, sigma_ms=2.5) -> tuple[Beats, list[Segment]]:
