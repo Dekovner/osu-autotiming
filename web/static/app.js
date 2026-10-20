@@ -586,7 +586,7 @@ wave.addEventListener("pointerdown", (e) => {
 });
 wave.addEventListener("pointermove", (e) => {
   const w = wave.clientWidth;
-  hoverT = tOf(e.offsetX, w);
+  hoverT = drag && drag.kind === "line" ? tOf(e.offsetX, w) : snap(tOf(e.offsetX, w), e);  // the hover sticks where a click would
   renderHover();
   if (!drag) draw();
   if (!drag) {
