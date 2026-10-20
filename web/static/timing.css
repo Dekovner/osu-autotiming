@@ -110,6 +110,7 @@ select { padding: 2px 4px; font-family: var(--mono); font-size: 0.78rem; }
 .field .k { width: 6ch; font-size: 0.72rem; color: var(--muted); }
 .field .u { font-size: 0.72rem; color: var(--muted); }
 .field input { width: 12ch; padding: 3px 6px; font-size: 0.9rem; }
+.field .sp { width: 10px; }
 .joint { margin: 10px 2px; font-size: 0.75rem; color: var(--muted); }
 .joint b { color: var(--don); font-weight: 500; }
 

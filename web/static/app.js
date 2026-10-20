@@ -562,6 +562,20 @@ const onField = (id, apply) => {
 };
 onField("f-time", (l, v) => { l.time = v; });
 onField("f-bpm", (l, v) => { l.beat_length = 60000 / v; });
+
+// fine BPM steps: buttons, and arrow keys in the field (±0.1, shift ±1, alt ±0.01); rounded to
+// 0.001 BPM so repeated steps don't pile up float tails
+const stepBpm = (d) => edit((l) => {
+  const b = Math.round((bpmOf(l) + d) * 1000) / 1000;
+  if (b > 0) l.beat_length = 60000 / b;
+});
+document.querySelectorAll("[data-bpm]").forEach((b) => (b.onclick = () => stepBpm(+b.dataset.bpm)));
+$("f-bpm").addEventListener("keydown", (e) => {
+  if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+  e.preventDefault();
+  stepBpm((e.key === "ArrowUp" ? 1 : -1) * (e.shiftKey ? 1 : e.altKey ? 0.01 : 0.1));
+  $("f-bpm").value = fmtBpm(bpmOf(lines[sel]));
+});
 onField("f-meter", (l, v) => { l.meter = Math.max(1, Math.round(v)); });
 
 // waveform: wheel zooms around the pointer, drag pans, click seeks, a red line can be dragged

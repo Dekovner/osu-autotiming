@@ -6,7 +6,7 @@
 <title>auneu · timing</title>
 <meta name="description" content="Automatic osu! timing from audio: BPM, offset and red lines, with an editor to check and fine-tune them.">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="timing.css?v=7">
+<link rel="stylesheet" href="timing.css?v=8">
 </head>
 <body>
 <div class="intro">
@@ -73,7 +73,10 @@
       </div>
       <div class="field">
         <span class="k mono">bpm</span>
-        <input id="f-bpm" class="mono" inputmode="decimal">
+        <button data-bpm="-1">−1</button><button data-bpm="-0.1">−.1</button><button data-bpm="-0.01">−.01</button>
+        <input id="f-bpm" class="mono" inputmode="decimal" title="↑/↓ ±0.1 · shift ±1 · alt ±0.01">
+        <button data-bpm="0.01">+.01</button><button data-bpm="0.1">+.1</button><button data-bpm="1">+1</button>
+        <span class="sp"></span>
         <button id="half" title="half the BPM">×½</button>
         <button id="double" title="double the BPM">×2</button>
         <button id="shift" title="move by half a beat: the grid was on the offbeat">½ beat</button>
@@ -97,6 +100,6 @@
   </div>
 </section>
 
-<script src="app.js?v=9"></script>
+<script src="app.js?v=10"></script>
 </body>
 </html>
