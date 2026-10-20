@@ -10,9 +10,12 @@ RUN curl -fsSL -o /tmp/bass.zip https://www.un4seen.com/files/bass24-linux.zip \
     && rm /tmp/bass.zip
 
 WORKDIR /app
+# dependencies in their own layer: a code change then rebuilds in seconds, not minutes of
+# pip on a VPS that also carries a VPN (keep in sync with pyproject.toml)
+RUN pip install --no-cache-dir numpy scipy requests numba "discord.py>=2.4"
 COPY pyproject.toml ./
 COPY src ./src
-RUN pip install --no-cache-dir ".[bot]"
+RUN pip install --no-cache-dir --no-deps .
 COPY bot ./bot
 
 ENV PYTHONUNBUFFERED=1 AUTOTIMING_BASS_DIR=/opt/bass NUMBA_CACHE_DIR=/tmp/numba OMP_NUM_THREADS=1

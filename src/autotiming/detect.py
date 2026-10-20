@@ -625,10 +625,66 @@ def detect_full(o: Onsets, pcm=None, sr=None, downbeat_ms: float | None = None) 
     # a mapper who knows where "1" is (osu! time) overrides the guess
     anchor = downbeat_anchor(o, steady, ch) if downbeat_ms is None else downbeat_ms - OSU_OFFSET_MS
     if o.profile is None or o.times[-1] - o.times[0] < TRACK_MIN_MS:
-        return first_on_downbeat(steady, anchor, ch, o)
+        return connect_lines(first_on_downbeat(steady, anchor, ch, o))
     main_L = main_beat_length(o, steady)
     tracked = track_beats(o, fine_sections(o, main_L), probs=beat_prob(o, main_L))
-    return first_on_downbeat(combine(o, steady, tracked, anchor), anchor, ch, o)
+    return connect_lines(first_on_downbeat(combine(o, steady, tracked, anchor), anchor, ch, o))
+
+
+CONNECT_MAX_MS = 15.0  # a line further off the previous grid is a real reset, not a fitting gap
+CONNECT_MAX_MS_PER_BEAT = 2.0  # and closing the gap may not bend the section's grid more than this per beat
+
+
+def connect_lines(segs: list[Segment]) -> list[Segment]:
+    """Make every red line land exactly on the previous section's grid.
+
+    osu! stores red lines in whole ms and restarts barlines at each one; if the
+    previous grid reaches the next line 1-3 ms off, the editor shows a double
+    barline and mappers call the lines "not connected". Times are rounded to ms
+    and each section's beat length becomes (next line - this line) / beats
+    between them, so the grids meet exactly. A line more than CONNECT_MAX_MS off
+    the previous grid is a real phase reset and is left alone.
+    """
+    segs = sorted(segs, key=lambda s: s.time)
+    m = len(segs)
+    if m < 2:
+        return [Segment(float(round(s.time)), s.beat_length, s.meter) for s in segs]
+    # which joints to close, and the whole number of beats each section spans
+    n = [0] * m
+    joined = [False] * m
+    for i in range(m - 1):
+        x = (segs[i + 1].time - segs[i].time) / segs[i].beat_length
+        gap = abs(x - round(x)) * segs[i].beat_length
+        if round(x) >= 1 and gap <= CONNECT_MAX_MS and gap / round(x) <= CONNECT_MAX_MS_PER_BEAT:
+            n[i], joined[i] = int(round(x)), True
+    # joint least squares per chain of joined sections: the knots move so both neighbours'
+    # grids stay on their own beats (a long steady section barely moves; a short one bends)
+    T = [s.time for s in segs]
+    i = 0
+    while i < m:
+        j = i
+        while j < m - 1 and joined[j]:
+            j += 1
+        if j > i:  # sections i..j-1 are joined; knots i..j-1 move, knot j (start of a section
+            # whose own grid runs on unchecked) stays where it is
+            rows, rhs = [], []
+            for a in range(i, j):
+                for k in range(n[a] + 1):  # section a's own beats, from its knot to the next
+                    r = np.zeros(j - i)
+                    target = segs[a].time + k * segs[a].beat_length
+                    r[a - i] += 1 - k / n[a]
+                    if a + 1 < j:
+                        r[a + 1 - i] += k / n[a]
+                    else:
+                        target -= k / n[a] * segs[j].time
+                    rows.append(r)
+                    rhs.append(target)
+            sol, *_ = np.linalg.lstsq(np.array(rows), np.array(rhs), rcond=None)
+            T[i:j] = list(sol)
+        i = j + 1
+    t = [float(round(x)) for x in T]  # osu! stores whole ms
+    return [Segment(t[i], (t[i + 1] - t[i]) / n[i] if joined[i] else segs[i].beat_length, segs[i].meter)
+            for i in range(m)]
 
 
 def first_on_downbeat(segs: list[Segment], anchor: float | None, ch, o: Onsets) -> list[Segment]:
