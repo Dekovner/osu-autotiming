@@ -241,8 +241,8 @@ JUMP_COST = 0.15  # Viterbi penalty for a tempo jump, in units of normalized coh
 
 
 def local_tempo_path(t, w, L_lo=60000 / 400, L_hi=60000 / 60, win_ms=WIN_MS, hop_ms=WIN_HOP_MS, jump_cost=None,
-                     prior_L=None, prior_w=0.0):
-    """Most likely beat length per window: free to drift slowly, penalized to jump."""
+                     prior_L=None, prior_w=0.0, drift=2):
+    """Most likely beat length per window: free to drift by up to `drift` grid steps (0.1% each) per window, penalized to jump."""
     Ls = L_lo * L_STEP ** np.arange(int(np.log(L_hi / L_lo) / np.log(L_STEP)) + 1)
     centers = np.arange(t[0] + win_ms / 2, max(t[-1] - win_ms / 2, t[0] + win_ms / 2) + 1, hop_ms)
     E = np.zeros((len(centers), len(Ls)))
@@ -261,9 +261,9 @@ def local_tempo_path(t, w, L_lo=60000 / 400, L_hi=60000 / 60, win_ms=WIN_MS, hop
     n = len(score)
     for i in range(1, len(E)):
         # best predecessor among the 5 neighbouring beat lengths (drift), vectorized
-        padded = np.pad(score, 2, constant_values=-np.inf)
-        win = np.lib.stride_tricks.sliding_window_view(padded, 5)
-        near_arg = np.arange(n) - 2 + win.argmax(axis=1)
+        padded = np.pad(score, drift, constant_values=-np.inf)
+        win = np.lib.stride_tricks.sliding_window_view(padded, 2 * drift + 1)
+        near_arg = np.arange(n) - drift + win.argmax(axis=1)
         near = win.max(axis=1)
         jump_arg = int(np.argmax(score))
         jump = score[jump_arg] - jump_cost
@@ -481,28 +481,55 @@ def octave_score(f: dict) -> float:
     return sum(c * f[k] for k, c in OCTAVE_COEF.items())
 
 
+OCT_PER_SECTION = os.environ.get("OCT_PER_SECTION", "1") == "1"
+OCT_SECTION_MIN_BEATS = 32  # shorter sections follow the main section's octave
+OCT_CONT_LAMBDA = float(os.environ.get("OCT_CONT_LAMBDA", "1.0"))  # score cost per |log2(bpm / main bpm)|
+
+
 def choose_octave(o: Onsets, segs: list[Segment]) -> list[Segment]:
-    """Rescale every red line by the same x0.5/x1/x2 so the main tempo is what a mapper would pick."""
+    """Rescale red lines by x0.5/x1/x2 so each tempo is what a mapper would pick.
+
+    The main (longest) section decides by the octave model. Other long sections
+    decide on their own, with a cost for straying from the main tempo: a slow
+    middle section at 150 in a 200 BPM song would otherwise come out as 300
+    (the double grid always fits the onsets as well), yet genuine jumps like
+    154 -> 250 must survive.
+    """
     ends = [segs[i + 1].time if i + 1 < len(segs) else o.times[-1] + 1 for i in range(len(segs))]
     main = max(range(len(segs)), key=lambda i: ends[i] - segs[i].time)
-    lo = segs[main].time if main > 0 else o.times[0]
-    cands = octave_candidates(o, segs[main].time, segs[main].beat_length, lo, ends[main])
-    if o.profile is None:  # no band profile: fall back to the plain tempo prior
-        f = min(cands, key=lambda k: abs(np.log(segs[main].bpm * k / OCTAVE_CENTER_BPM)))
-    else:
-        f = max(cands, key=lambda k: octave_score(octave_features(o, *cands[k], lo, ends[main])))
-    if f == 1.0:
-        return segs
-    if f == 2.0:
-        return [Segment(s.time, s.beat_length / 2, s.meter) for s in segs]
-    # halving: one of every two old beats becomes the beat; kick/bass decides which
-    wl, w = o.strength * (o.sub + 0.5 * o.low), weights(o)
+
+    def scored(i):
+        lo = segs[i].time if i > 0 else o.times[0]
+        cands = octave_candidates(o, segs[i].time, segs[i].beat_length, lo, ends[i])
+        if o.profile is None:  # no band profile: fall back to the plain tempo prior
+            return {k: -abs(np.log(segs[i].bpm * k / OCTAVE_CENTER_BPM)) for k in cands}, cands
+        return {k: octave_score(octave_features(o, *cands[k], lo, ends[i])) for k in cands}, cands
+
+    s_main, c_main = scored(main)
+    f_main = max(s_main, key=s_main.get)
+    main_bpm = segs[main].bpm * f_main
     out = []
     for i, s in enumerate(segs):
-        sel = (o.times >= s.time - 2 * s.beat_length) & (o.times < ends[i])
-        L = 2 * s.beat_length
-        phi = beat_phase(o.times[sel], wl[sel], w[sel], s.time, L, subdiv=2) if sel.any() else s.time
-        out.append(Segment(phi if i == 0 else s.time + ((phi - s.time) % L), L, s.meter))
+        if i == main:
+            f, cands = f_main, c_main
+        elif OCT_PER_SECTION and (ends[i] - s.time) / s.beat_length >= OCT_SECTION_MIN_BEATS:
+            sc, cands = scored(i)
+            f = max(sc, key=lambda k: sc[k] - OCT_CONT_LAMBDA * abs(np.log2(s.bpm * k / main_bpm)))
+        else:
+            f, cands = f_main, None
+        if f == 1.0:
+            out.append(s)
+        elif f == 2.0:
+            out.append(Segment(s.time, s.beat_length / 2, s.meter))
+        else:  # halving: one of every two old beats becomes the beat; kick/bass decides which
+            L = 2 * s.beat_length
+            if cands is not None:
+                phi = cands[0.5][0]
+            else:
+                wl, w = o.strength * (o.sub + 0.5 * o.low), weights(o)
+                sel = (o.times >= s.time - 2 * s.beat_length) & (o.times < ends[i])
+                phi = beat_phase(o.times[sel], wl[sel], w[sel], s.time, L, subdiv=2) if sel.any() else s.time
+            out.append(Segment(phi if i == 0 else s.time + ((phi - s.time) % L), L, s.meter))
     return out
 
 
@@ -599,6 +626,18 @@ def combine(o: Onsets, steady: list[Segment], tracked, anchor: float | None = No
     return [Segment(s.time + OSU_OFFSET_MS, s.beat_length, s.meter) for s in segs]
 
 
+def align_octave(secs: list[Segment], steady: list[Segment]) -> list[Segment]:
+    """Scale each section (onset clock) by x0.5/x1/x2 to sit closest to the steady tempo at its start."""
+    st = sorted(steady, key=lambda s: s.time)
+    starts = np.array([s.time - OSU_OFFSET_MS for s in st])
+    out = []
+    for s in secs:
+        ref = st[max(0, int(np.searchsorted(starts, s.time, side="right")) - 1)].beat_length
+        k = min((0.5, 1.0, 2.0), key=lambda k: abs(np.log(s.beat_length / k / ref)))
+        out.append(Segment(s.time, s.beat_length / k, s.meter))
+    return out
+
+
 def main_beat_length(o: Onsets, steady: list[Segment]) -> float:
     starts = sorted(s.time - OSU_OFFSET_MS for s in steady)
     ends = starts[1:] + [o.times[-1]]
@@ -627,7 +666,9 @@ def detect_full(o: Onsets, pcm=None, sr=None, downbeat_ms: float | None = None) 
     if o.profile is None or o.times[-1] - o.times[0] < TRACK_MIN_MS:
         return connect_lines(first_on_downbeat(steady, anchor, ch, o))
     main_L = main_beat_length(o, steady)
-    tracked = track_beats(o, fine_sections(o, main_L), probs=beat_prob(o, main_L))
+    # the tracker expects each section at the octave the steady lines chose there
+    secs = align_octave(fine_sections(o, main_L), steady)
+    tracked = track_beats(o, secs, probs=beat_prob(o, main_L))
     return connect_lines(first_on_downbeat(combine(o, steady, tracked, anchor), anchor, ch, o))
 
 

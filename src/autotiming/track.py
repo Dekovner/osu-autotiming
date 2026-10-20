@@ -227,6 +227,9 @@ SPAN = 1.35  # tempo freedom inside a section: wide enough for rubato, too narro
 FINE_WIN_MS, FINE_HOP_MS = 6000.0, 1000.0  # short windows so a few bars at a new tempo get their own section
 SECTION_TOL = 0.08  # windows within ±8% belong to one section; the tracker follows drift inside it
 FINE_RANGE = 1.75  # section tempos within x0.57..x1.75 of the main one: jumps like 210 -> 335 fit, x2 doesn't
+# grid steps (0.1% each) the tempo may slide per 1 s window for free: 4%/s follows a ritardando like
+# 200 -> 150 in 7 s instead of jumping, where x2 would look as good as the true tempo
+FINE_DRIFT = int(_env("FINE_DRIFT", "40"))
 
 
 def fine_sections(o, main_L: float) -> list[Segment]:
@@ -239,7 +242,7 @@ def fine_sections(o, main_L: float) -> list[Segment]:
     # x2 / x0.5 must stay out of reach: coherence at double tempo is never worse
     # (it has the beats and the halves), so a wider range slides onto eighth notes
     centers, Lpath = local_tempo_path(t, w, main_L / FINE_RANGE, main_L * FINE_RANGE, FINE_WIN_MS, FINE_HOP_MS,
-                                      jump_cost=0.1, prior_L=main_L, prior_w=0.3)
+                                      jump_cost=0.1, prior_L=main_L, prior_w=0.3, drift=FINE_DRIFT)
     groups = [[0]]
     for i in range(1, len(centers)):
         if abs(np.log(Lpath[i] / np.median(Lpath[groups[-1]]))) < SECTION_TOL:
