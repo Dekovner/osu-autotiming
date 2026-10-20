@@ -15,7 +15,14 @@
 }
 
 * { box-sizing: border-box; }
-html { background: var(--bg); }
+html {
+  min-height: 100%;
+  background:
+    radial-gradient(ellipse 60% 40% at 88% -5%, #f04b3c1c, transparent 70%),
+    radial-gradient(ellipse 40% 35% at 100% 10%, #4598e014, transparent 70%),
+    var(--bg);
+  background-attachment: fixed;
+}
 [hidden] { display: none !important; }
 
 body {
@@ -25,10 +32,6 @@ body {
   padding: 0 max(16px, env(safe-area-inset-right)) 48px max(16px, env(safe-area-inset-left));
   color: var(--ink);
   font: 15px/1.6 var(--sans);
-  background:
-    radial-gradient(ellipse 60% 40% at 88% -5%, #f04b3c1c, transparent 70%),
-    radial-gradient(ellipse 40% 35% at 100% 10%, #4598e014, transparent 70%),
-    var(--bg);
 }
 ::selection { background: var(--don); color: #fff; }
 .mono { font-family: var(--mono); }
@@ -40,7 +43,10 @@ body {
 .sub { margin: 0; color: var(--muted); font-size: 0.9rem; }
 
 /* upload: one row, like the site's lists */
-.drop { border-top: 1px solid var(--faint); border-bottom: 1px solid var(--faint); max-width: 620px; }
+/* title on the left, the upload row on the right, as wide as the editor below */
+.intro { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 8px 48px; }
+.intro .top { flex: 0 0 auto; }
+.drop { flex: 1 1 420px; max-width: 680px; margin-bottom: 20px; border-top: 1px solid var(--faint); border-bottom: 1px solid var(--faint); }
 .drop-row { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; padding: 18px 2px; cursor: pointer; }
 .drop-row input { display: none; }
 .drop-name { font: 500 1.05rem var(--display); }
