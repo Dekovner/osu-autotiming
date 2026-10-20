@@ -76,4 +76,7 @@ def compare(pred: list[Segment], truth: list[Segment], start: float, end: float)
         "p95_ms": float(np.percentile(err, 95)),
         "max_ms": float(err.max()),
         "bias_ms": float(np.median(p2t)),  # + = predicted grid is late
+        # share of the song (true beats) already timed right: the work a mapper doesn't redo
+        "cover5": float(np.mean(np.abs(t2p) < 5)),
+        "cover10": float(np.mean(np.abs(t2p) < 10)),
     }

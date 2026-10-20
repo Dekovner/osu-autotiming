@@ -7,6 +7,7 @@ least squares over the whole song. Hundreds of onsets spread over minutes pin th
 beat length far tighter than any frame-based tempo estimate.
 """
 
+import os
 from dataclasses import dataclass
 
 import numpy as np
@@ -40,41 +41,42 @@ class Onsets:
     hop_ms: float  # exact frame step (HOP_MS rounded to whole samples)
 
 
-def _bands(sr: int) -> np.ndarray:
+def _bands(sr: int, n_fft: int) -> np.ndarray:
     """Bin edges of log-spaced bands, 30 Hz .. 16 kHz."""
-    freqs = np.fft.rfftfreq(N_FFT, 1 / sr)
+    freqs = np.fft.rfftfreq(n_fft, 1 / sr)
     edges = np.geomspace(30, min(16000, sr / 2 - 1), N_BANDS + 1)
     idx = np.searchsorted(freqs, edges)
     return np.maximum.accumulate(np.maximum(idx, np.arange(len(idx)) + 1))
 
 
-def onsets(pcm: np.ndarray, sr: int) -> Onsets:
-    hop = int(round(sr * HOP_MS / 1000))
+def onsets(pcm: np.ndarray, sr: int, n_fft: int = N_FFT, hop_target_ms: float = HOP_MS) -> Onsets:
+    hop = int(round(sr * hop_target_ms / 1000))
     hop_ms = hop * 1000 / sr
-    pad = np.concatenate([np.zeros(N_FFT // 2, np.float32), pcm, np.zeros(N_FFT, np.float32)])
-    n_frames = (len(pad) - N_FFT) // hop
-    win = np.hanning(N_FFT).astype(np.float32)
-    edges = _bands(sr)
+    flux_lag = max(1, int(round(FLUX_LAG * HOP_MS / hop_ms)))  # same 6 ms whatever the hop
+    pad = np.concatenate([np.zeros(n_fft // 2, np.float32), pcm, np.zeros(n_fft, np.float32)])
+    n_frames = (len(pad) - n_fft) // hop
+    win = np.hanning(n_fft).astype(np.float32)
+    edges = _bands(sr, n_fft)
     low_bands = np.searchsorted(np.geomspace(30, 16000, N_BANDS + 1), 200)
     sub_bands = np.searchsorted(np.geomspace(30, 16000, N_BANDS + 1), 90)
     bands = np.empty((n_frames, N_BANDS), np.float32)
     step = 8192  # frames per chunk keeps memory flat on long songs
     for s in range(0, n_frames, step):
         e = min(n_frames, s + step)
-        idx = (np.arange(s, e) * hop)[:, None] + np.arange(N_FFT)[None, :]
+        idx = (np.arange(s, e) * hop)[:, None] + np.arange(n_fft)[None, :]
         mag = np.abs(np.fft.rfft(pad[idx] * win, axis=1))
         cs = np.concatenate([np.zeros((e - s, 1), np.float32), np.cumsum(mag, axis=1, dtype=np.float32)], axis=1)
         bands[s:e] = (cs[:, edges[1:]] - cs[:, edges[:-1]]) / np.diff(edges)
     logb = np.log1p(1000 * bands)
     diff = np.zeros_like(logb)
-    diff[FLUX_LAG:] = np.maximum(0, logb[FLUX_LAG:] - logb[:-FLUX_LAG])
+    diff[flux_lag:] = np.maximum(0, logb[flux_lag:] - logb[:-flux_lag])
     env = diff.sum(axis=1)
     env_low = diff[:, :low_bands].sum(axis=1)
     env_sub = diff[:, :sub_bands].sum(axis=1)
 
     # peaks above a local adaptive threshold, at least 25 ms apart
-    thresh = median_filter(env, size=int(400 / HOP_MS)) + 0.3 * uniform_filter1d(env, int(2000 / HOP_MS)) + 1e-6
-    is_peak = (env == maximum_filter1d(env, int(25 / HOP_MS) * 2 + 1)) & (env > thresh)
+    thresh = median_filter(env, size=int(400 / hop_ms)) + 0.3 * uniform_filter1d(env, int(2000 / hop_ms)) + 1e-6
+    is_peak = (env == maximum_filter1d(env, int(25 / hop_ms) * 2 + 1)) & (env > thresh)
     k = np.flatnonzero(is_peak)
     k = k[(k > 0) & (k < len(env) - 1)]
     # parabolic interpolation for sub-frame peak position
@@ -309,7 +311,52 @@ def _detect_raw(o: Onsets) -> list[Segment]:
         if hi < lo:
             lo, hi = hi, lo
         out.append(Segment(_boundary(t, w, a, b, lo - WIN_HOP_MS, hi + WIN_HOP_MS), b.beat_length))
-    return out
+    return prune_segments(t, w, wl, out, Segment(phi, L))
+
+
+def piecewise_excess(t, w, segs: list[Segment], subdiv=4, tol=8.0) -> float:
+    """grid_excess for a whole timing: each onset is judged against the red line it falls under."""
+    starts = np.array([s.time for s in segs])
+    idx = np.clip(np.searchsorted(starts, t, side="right") - 1, 0, len(segs) - 1)
+    ph = np.array([s.time for s in segs])[idx]
+    q = np.array([s.beat_length for s in segs])[idx] / subdiv
+    d = np.abs((t - ph + q / 2) % q - q / 2)
+    return float((w * ((d < tol) - np.minimum(1.0, 2 * tol / q))).sum() / (w.sum() + 1e-9))
+
+
+PRUNE_SLACK = 0.01  # a red line must explain at least this much more onset mass to stay
+
+
+def prune_segments(t, w, wl, segs: list[Segment], global_seg: Segment) -> list[Segment]:
+    """Drop red lines that don't earn their keep.
+
+    Spurious tempo changes come from noisy windows; a real one makes the onsets
+    clearly fit better. Greedily merge the neighbour pair whose merge costs the
+    least, while that cost stays under PRUNE_SLACK.
+    """
+    if len(segs) > 1 and piecewise_excess(t, w, [global_seg]) >= piecewise_excess(t, w, segs) - PRUNE_SLACK:
+        return [global_seg]
+    while len(segs) > 1:
+        base = piecewise_excess(t, w, segs)
+        best = None
+        for i in range(len(segs) - 1):
+            lo = segs[i].time if i > 0 else t[0]
+            hi = segs[i + 2].time if i + 2 < len(segs) else t[-1] + 1
+            sel = (t >= lo) & (t < hi)
+            if sel.sum() < 8:
+                cand_segs = segs[:i + 1] + segs[i + 2:]
+            else:
+                fits = [fit_grid(t[sel], w[sel], s.beat_length, span=0.006, w_low=wl[sel]) for s in segs[i:i + 2]]
+                p, l, _ = max(fits, key=lambda f: f[2])
+                start = p if i == 0 else p + np.ceil((segs[i].time - p) / l - 0.5) * l
+                cand_segs = segs[:i] + [Segment(start, l)] + segs[i + 2:]
+            score = piecewise_excess(t, w, cand_segs)
+            if best is None or score > best[0]:
+                best = (score, cand_segs)
+        if best[0] < base - PRUNE_SLACK:
+            break
+        segs = best[1]
+    return segs
 
 
 def choose_octave(o: Onsets, segs: list[Segment]) -> list[Segment]:
@@ -338,6 +385,29 @@ def detect_onsets(o: Onsets) -> list[Segment]:
     return [Segment(s.time + OSU_OFFSET_MS, s.beat_length, s.meter) for s in segs]
 
 
-def detect(path) -> list[Segment]:
+FINE_N_FFT, FINE_HOP_MS, FINE_MATCH_MS = 512, 1.0, 8.0
+
+
+def sharpen(o: Onsets, fine: Onsets) -> Onsets:
+    """Swap each onset time for the short-window one found within FINE_MATCH_MS.
+
+    The 23 ms analysis window is good for tempo and phase cues (bass needs it)
+    but smears where a soft attack starts; an 11.6 ms window localizes it better.
+    """
+    if len(fine.times) == 0:
+        return o
+    j = np.clip(np.searchsorted(fine.times, o.times), 1, len(fine.times) - 1)
+    near = np.where(np.abs(fine.times[j - 1] - o.times) < np.abs(fine.times[j] - o.times), j - 1, j)
+    d = fine.times[near] - o.times
+    times = np.where(np.abs(d) < FINE_MATCH_MS, fine.times[near], o.times)
+    return Onsets(times, o.strength, o.low, o.env, o.env_low, o.sub, o.hop_ms)
+
+
+def detect(path, fine: bool | None = None) -> list[Segment]:
+    if fine is None:
+        fine = os.environ.get("AUTOTIMING_FINE", "0") == "1"
     pcm, sr = decode_bass(path)
-    return detect_onsets(onsets(pcm, sr))
+    o = onsets(pcm, sr)
+    if fine:
+        o = sharpen(o, onsets(pcm, sr, FINE_N_FFT, FINE_HOP_MS))
+    return detect_onsets(o)

@@ -4,3 +4,5 @@ data
 .claude/
 vendor/bass/*
 !vendor/bass/README.md
+# Timing Analyzer v0.32.4 (third-party exe + bass.dll), only used as a benchmark competitor
+vendor/timinganalyzer

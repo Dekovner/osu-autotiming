@@ -113,7 +113,9 @@ def summarize(rows, label):
     p95 = np.array([r["p95_ms"] for r in good]) if good else np.array([np.inf])
     share = lambda x: f"{100 * np.mean(p95 < x) * len(good) / len(rows):5.1f}%"
     bias = np.median([r["bias_ms"] for r in good if r["p95_ms"] < 20]) if any(r["p95_ms"] < 20 for r in good) else float("nan")
+    cover = lambda k: np.sum([r.get(k, 0) for r in ok]) / len(rows)
     print(f"  {label:28} n={len(rows):4}  grid p95<5ms {share(5)}  <10ms {share(10)}  <20ms {share(20)}"
+          f"   song covered ±5ms {cover('cover5'):4.0%} ±10ms {cover('cover10'):4.0%}"
           f"   tempo: x1 {octs[1]:3} x2/half {octs[2] + octs[0.5]:3} wrong {octs[0]:3} fail {len(rows) - len(ok):3}"
           f"   bias(good) {bias:+.1f}ms")
 
@@ -124,6 +126,7 @@ def main():
     p.add_argument("--methods", nargs="+", default=["ours"])
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--summary-only", action="store_true")
+    p.add_argument("--rescore", action="store_true", help="recompute metrics from cached predictions")
     p.add_argument("--by", help="tag to break the summary down by")
     p.add_argument("--limit", type=int)
     args = p.parse_args()
@@ -142,6 +145,18 @@ def main():
                     if i % 50 == 0:
                         print(f"  {i}/{len(todo)}", flush=True)
     ids = {it["id"] for it in items}
+    if args.rescore:  # metric changed: recompute from cached predictions, no detection
+        by_id = {it["id"]: it for it in items}
+        for method in args.methods:
+            f = RESULTS / f"{args.dataset}_{method}.jsonl"
+            rows = load(args.dataset, method)
+            with f.open("w") as out:
+                for r in rows:
+                    it = by_id.get(r["id"])
+                    if it and r.get("pred"):
+                        res = compare([Segment(t, L) for t, L in r["pred"]], it["truth"], *it["span"])
+                        r = {**r, **res}
+                    out.write(json.dumps(r) + "\n")
     for method in args.methods:
         rows = [r for r in load(args.dataset, method) if r["id"] in ids]
         print(f"{method}:")
