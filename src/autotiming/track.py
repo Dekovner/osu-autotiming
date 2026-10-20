@@ -454,7 +454,8 @@ def hybrid(o, steady: list[Segment], tracked: Beats, margin=HYBRID_MARGIN, reali
 
 
 SMOOTH_LAMBDA = float(__import__("os").environ.get("TRACK_SMOOTH", "30"))  # stiffness of the tempo curve
-SMOOTH_HUBER_MS = 4.0  # second differences beyond this count linearly: real tempo jumps survive
+SMOOTH_HUBER_MS = float(_env("SMOOTH_HUBER_MS", "1"))  # beat-length changes beyond this count linearly (near L1):
+# a step 180 -> 170 stays one step instead of a ramp spread over 8 beats, as mappers time it
 
 
 def smooth_beats(o, skeleton: Beats, lam: float = SMOOTH_LAMBDA, weights=None) -> Beats:
