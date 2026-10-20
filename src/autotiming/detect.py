@@ -215,25 +215,33 @@ L_STEP = 1.001  # log spacing of the local tempo search (window peaks are ~5% wi
 JUMP_COST = 0.15  # Viterbi penalty for a tempo jump, in units of normalized coherence
 
 
-def local_tempo_path(t, w, L_lo=60000 / 400, L_hi=60000 / 60):
+def local_tempo_path(t, w, L_lo=60000 / 400, L_hi=60000 / 60, win_ms=WIN_MS, hop_ms=WIN_HOP_MS, jump_cost=None,
+                     prior_L=None, prior_w=0.0):
     """Most likely beat length per window: free to drift slowly, penalized to jump."""
     Ls = L_lo * L_STEP ** np.arange(int(np.log(L_hi / L_lo) / np.log(L_STEP)) + 1)
-    centers = np.arange(t[0] + WIN_MS / 2, max(t[-1] - WIN_MS / 2, t[0] + WIN_MS / 2) + 1, WIN_HOP_MS)
+    centers = np.arange(t[0] + win_ms / 2, max(t[-1] - win_ms / 2, t[0] + win_ms / 2) + 1, hop_ms)
     E = np.zeros((len(centers), len(Ls)))
     for i, c in enumerate(centers):
-        sel = np.abs(t - c) < WIN_MS / 2
+        sel = np.abs(t - c) < win_ms / 2
         if sel.sum() < 6:
             continue
         tt, ww = t[sel], w[sel]
         E[i] = coherence(tt, ww, Ls) / (ww.sum() * sum(a for _, a in HARMONICS))
+    if prior_L is not None:  # soft preference for the main tempo, against x1.5 / x0.67 slides
+        E -= prior_w * np.log(Ls / prior_L)[None, :] ** 2
     # Viterbi: moving to a neighbouring L (drift) is free, anything else costs JUMP_COST
+    jump_cost = JUMP_COST if jump_cost is None else jump_cost
     score = E[0].copy()
     back = np.zeros(E.shape, int)
+    n = len(score)
     for i in range(1, len(E)):
-        near = maximum_filter1d(score, 5)
-        near_arg = np.array([j - 2 + int(np.argmax(score[max(0, j - 2):j + 3])) + (2 - min(j, 2)) for j in range(len(score))])
+        # best predecessor among the 5 neighbouring beat lengths (drift), vectorized
+        padded = np.pad(score, 2, constant_values=-np.inf)
+        win = np.lib.stride_tricks.sliding_window_view(padded, 5)
+        near_arg = np.arange(n) - 2 + win.argmax(axis=1)
+        near = win.max(axis=1)
         jump_arg = int(np.argmax(score))
-        jump = score[jump_arg] - JUMP_COST
+        jump = score[jump_arg] - jump_cost
         use_jump = jump > near
         back[i] = np.where(use_jump, jump_arg, near_arg)
         score = np.where(use_jump, jump, near) + E[i]
@@ -283,7 +291,8 @@ def _detect_raw(o: Onsets) -> list[Segment]:
     wl = o.strength * (o.sub + 0.5 * o.low)
     # global pass: the beat octave of the strongest candidate anchors the local search
     best = None
-    for L0 in tempo_candidates(o.env, o.hop_ms):
+    # no autocorrelation peak at all (near-silent or arrhythmic audio): fall back to the prior's tempo
+    for L0 in tempo_candidates(o.env, o.hop_ms) or [60000 / OCTAVE_CENTER_BPM]:
         phi, L, score = fit_grid(t, w, L0, w_low=wl)
         if best is None or score > best[2]:
             best = (phi, L, score)
