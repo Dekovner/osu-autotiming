@@ -1,7 +1,10 @@
 "use strict";
 // auneu.space/timing: upload a song, get red lines from the server, check and edit them on a waveform.
 // Times are osu! ms (the BASS decode osu! plays). The browser decodes the file itself for playback;
-// decodeShift lines that decode up with the server's (browser time = osu time + decodeShift).
+// decodeShift lines that decode up with the server's (browser time = BASS time + decodeShift).
+// osu! time is not the decode's own clock: a red line sits AUDIO_LAG ms before the attack it times
+// (the detector's OSU_OFFSET_MS), so the sound at osu time t is the decode at t + AUDIO_LAG. The
+// waveform and playback are shifted by it, so a well-timed line sits on the attack, by eye and ear.
 
 const $ = (id) => document.getElementById(id);
 const API = "api/analyze";
@@ -9,7 +12,7 @@ const SNAP_COLORS = { 1: "#ecebf1", 2: "#f04b3c", 3: "#b07ad8", 4: "#4598e0", 6:
 const LINE_HIT_PX = 7;
 
 let actx = null, buffer = null, musicGain = null, clickGain = null;
-let duration = 0, decodeShift = 0;
+let duration = 0, decodeShift = 0, AUDIO_LAG = 20.4;
 let mip = [];                      // [{step, min, max}] waveform levels, 1 ms .. 1 s per bin
 let lines = [], sel = -1;          // red lines {time, beat_length, meter}, sorted by time
 let past = [], future = [];
@@ -234,7 +237,7 @@ function draw() {
   g.fillStyle = "#a9a6b6";
   g.globalAlpha = 0.75;
   for (let x = 0; x < w; x++) {
-    const [mn, mx] = range(tOf(x, w), tOf(x + 1, w));
+    const [mn, mx] = range(tOf(x, w) + AUDIO_LAG, tOf(x + 1, w) + AUDIO_LAG);
     const y0 = mid - mx * mid * 0.92, y1 = mid - mn * mid * 0.92;
     g.fillRect(x, y0, 1, Math.max(1, y1 - y0));
   }
@@ -270,7 +273,7 @@ function drawOverview() {
   g.clearRect(0, 0, w, h);
   g.fillStyle = "#85838f";
   for (let x = 0; x < w; x++) {
-    const [mn, mx] = range((x / w) * duration, ((x + 1) / w) * duration);
+    const [mn, mx] = range((x / w) * duration + AUDIO_LAG, ((x + 1) / w) * duration + AUDIO_LAG);
     g.fillRect(x, h / 2 - mx * h * 0.45, 1, Math.max(1, (mx - mn) * h * 0.45));
   }
   g.fillStyle = "#f04b3c";
@@ -307,7 +310,7 @@ function play() {
   source.buffer = buffer;
   source.playbackRate.value = rate;
   source.connect(musicGain);
-  const off = (cursor + decodeShift) / 1000;
+  const off = (cursor + AUDIO_LAG + decodeShift) / 1000;
   playCtx0 = actx.currentTime + 0.03;
   if (off >= 0) source.start(playCtx0, off);
   else source.start(playCtx0 - off / rate, 0);
@@ -323,6 +326,8 @@ function pause() {
   cursor = Math.min(now(), duration);
   playing = false;
   try { source.stop(); } catch (e) { /* already stopped */ }
+  for (const n of clicks) { try { n.stop(); } catch (e) { /* not started or done */ } }
+  clicks = [];
   $("play").textContent = "play";
   draw();
 }
@@ -341,31 +346,25 @@ function loop() {
   requestAnimationFrame(loop);
 }
 
-let noise = null;
+let clicks = [];  // scheduled click nodes, stopped on pause
 function click(when, accent) {
-  if (!noise) {  // 20 ms of white noise for the attack: cuts through a dense mix better than a pure tone
-    noise = actx.createBuffer(1, Math.round(actx.sampleRate * 0.02), actx.sampleRate);
-    const d = noise.getChannelData(0);
-    for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / d.length);
-  }
+  // a clean woodblock-like tick: sine with a quick pitch drop and a fast decay
   const o = actx.createOscillator(), gn = actx.createGain();
-  o.type = "square";
-  o.frequency.value = accent ? 2000 : 1400;
+  const f = accent ? 1660 : 1180;
+  o.frequency.setValueAtTime(f * 1.5, when);
+  o.frequency.exponentialRampToValueAtTime(f, when + 0.008);
   gn.gain.setValueAtTime(0.0001, when);
-  gn.gain.exponentialRampToValueAtTime(accent ? 0.9 : 0.6, when + 0.001);
-  gn.gain.exponentialRampToValueAtTime(0.0001, when + 0.045);
+  gn.gain.exponentialRampToValueAtTime(accent ? 1.0 : 0.7, when + 0.001);
+  gn.gain.exponentialRampToValueAtTime(0.0001, when + 0.07);
   o.connect(gn).connect(clickGain);
   o.start(when);
-  o.stop(when + 0.05);
-  const n = actx.createBufferSource(), ng = actx.createGain();
-  n.buffer = noise;
-  ng.gain.value = accent ? 0.7 : 0.45;
-  n.connect(ng).connect(clickGain);
-  n.start(when);
+  o.stop(when + 0.08);
+  clicks.push(o);
+  o.onended = () => { clicks = clicks.filter((x) => x !== o); };
 }
 function scheduleMetronome() {
   if (!$("metro").checked) { metroNext = now(); return; }
-  const until = now() + 150 * rate;
+  const until = now() + 90 * rate;  // look ahead a little: the rAF loop runs every ~16 ms
   for (const tk of ticks(metroNext, until, 1)) {
     const when = playCtx0 + (tk.t - playPos0) / (1000 * rate);
     if (when >= actx.currentTime) click(when, tk.level === 0);
@@ -443,6 +442,7 @@ async function load(file) {
   duration = res.duration_ms;
   buildMip(b64(res.wave.min, Int8Array), b64(res.wave.max, Int8Array));
   decodeShift = buffer ? alignDecode(b64(res.env.data, Uint8Array)) : 0;
+  AUDIO_LAG = res.audio_lag_ms ?? 20.4;
   phaseUncertain = res.phase_uncertain;
   past = []; future = [];
   lines = res.lines.map((l) => ({ time: Math.round(l.time), beat_length: l.beat_length, meter: l.meter }));

@@ -4,7 +4,7 @@
 
 POST /analyze  (multipart: file=<audio>, optional downbeat=<ms>)
   -> {"lines": [{"time", "beat_length", "meter"}...], "phase_uncertain", "alt": [...],
-      "duration_ms", "wave": {"ms_per_px": 1, "min": base64 int8, "max": base64 int8},
+      "duration_ms", "audio_lag_ms", "wave": {"ms_per_px": 1, "min": base64 int8, "max": base64 int8},
       "env": {"ms": 1, "data": base64 uint8}, "seconds"}
 
 The waveform and the 1 ms energy envelope come from the BASS decode osu! uses,
@@ -43,7 +43,7 @@ def analyse(path: str, downbeat_ms: float | None) -> dict:
     import numpy as np
 
     from autotiming.decode import decode_bass
-    from autotiming.detect import NoRhythmError, analyze
+    from autotiming.detect import OSU_OFFSET_MS, NoRhythmError, analyze
 
     t0 = time.time()
     try:
@@ -74,6 +74,7 @@ def analyse(path: str, downbeat_ms: float | None) -> dict:
         "phase_uncertain": bool(r.phase_uncertain),
         "alt": seg(r.alt_segments or []),
         "duration_ms": len(pcm) / sr * 1000,
+        "audio_lag_ms": -OSU_OFFSET_MS,  # a red line at t times the attack at t + this in the decode
         "wave": {"ms_per_px": 1, "min": q(mn), "max": q(mx)},
         "env": {"ms": 1, "data": env},
         "seconds": time.time() - t0,
