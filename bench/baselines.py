@@ -4,6 +4,7 @@ Beat trackers return beat lists; we take their BPM and the circular-mean phase o
 their beats, which is how such output ends up as a red line in practice.
 """
 
+import os
 from pathlib import Path
 
 import numpy as np
@@ -91,9 +92,18 @@ def timing_analyzer(path, timeout=180) -> list[Segment]:
 
 
 def ours(path) -> list[Segment]:
-    from autotiming.detect import detect
+    from autotiming import detect as D
 
-    return detect(path)
+    # learned models that never saw this song (bench/octave_trees_exp.py, bench/phase_trees_exp.py crossfit)
+    for env, name, attr in (("OCTAVE_CROSSFIT", "octave", "OCTAVE_TREES"), ("PHASE_CROSSFIT", "phase", "PHASE_TREES")):
+        if os.environ.get(env) == "1":
+            import hashlib
+            import json
+
+            cf = Path(__file__).resolve().parents[1] / "data" / f"{name}_crossfit"
+            fold = json.loads((cf / "assign.json").read_text()).get(hashlib.md5(Path(path).read_bytes()).hexdigest())
+            setattr(D, attr, cf / f"fold{fold}.npz" if fold is not None else Path(D.__file__).resolve().parent / "models" / f"{name}_trees.npz")
+    return D.detect(path)
 
 
 def ours_steady(path) -> list[Segment]:

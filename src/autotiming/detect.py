@@ -9,6 +9,7 @@ beat length far tighter than any frame-based tempo estimate.
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 from numba import njit
@@ -481,6 +482,31 @@ def octave_score(f: dict) -> float:
     return sum(c * f[k] for k, c in OCTAVE_COEF.items())
 
 
+# Boosted trees over the same features (bench/octave_trees_exp.py): 89.5% grouped CV on 733
+# ranked maps vs 85.7% for the logistic scores above, which remain the fallback.
+OCTAVE_TREES = Path(__file__).resolve().parent / "models" / "octave_trees.npz"
+OCTAVE_KEYS = sorted(OCTAVE_COEF)
+OCTAVE_KS = (0.5, 1.0, 2.0)
+
+
+def octave_matrix(feats: dict) -> np.ndarray:
+    """Model input for the x0.5 / x1 / x2 candidates: features, relative to the three's mean, rank among them."""
+    from scipy.stats import rankdata
+
+    F = np.nan_to_num(np.array([[feats[k][f] for f in OCTAVE_KEYS] for k in OCTAVE_KS]))
+    return np.concatenate([F, F - F.mean(0, keepdims=True), rankdata(F, axis=0)], axis=1)
+
+
+def octave_scores(feats: dict) -> dict:
+    """Score per candidate factor (log-odds that mappers pick it)."""
+    if not OCTAVE_TREES.exists():
+        return {k: octave_score(feats[k]) for k in feats}
+    from .beatprob import load_model, predict_proba
+
+    p = np.clip(predict_proba(load_model(OCTAVE_TREES), octave_matrix(feats)), 1e-6, 1 - 1e-6)
+    return {k: float(np.log(p[i] / (1 - p[i]))) for i, k in enumerate(OCTAVE_KS)}
+
+
 OCT_PER_SECTION = os.environ.get("OCT_PER_SECTION", "1") == "1"
 OCT_SECTION_MIN_BEATS = 32  # shorter sections follow the main section's octave
 OCT_CONT_LAMBDA = float(os.environ.get("OCT_CONT_LAMBDA", "1.0"))  # score cost per |log2(bpm / main bpm)|
@@ -503,7 +529,7 @@ def choose_octave(o: Onsets, segs: list[Segment]) -> list[Segment]:
         cands = octave_candidates(o, segs[i].time, segs[i].beat_length, lo, ends[i])
         if o.profile is None:  # no band profile: fall back to the plain tempo prior
             return {k: -abs(np.log(segs[i].bpm * k / OCTAVE_CENTER_BPM)) for k in cands}, cands
-        return {k: octave_score(octave_features(o, *cands[k], lo, ends[i])) for k in cands}, cands
+        return octave_scores({k: octave_features(o, *cands[k], lo, ends[i]) for k in cands}), cands
 
     s_main, c_main = scored(main)
     f_main = max(s_main, key=s_main.get)
@@ -670,12 +696,39 @@ def main_beat_length(o: Onsets, steady: list[Segment]) -> float:
     return sorted(steady, key=lambda s: s.time)[longest].beat_length
 
 
-def detect_full(o: Onsets, pcm=None, sr=None, downbeat_ms: float | None = None) -> list[Segment]:
+PHASE_MIN_BEATS = 32  # shorter steady sections take the main section's phase decision
+PHASE_UNSURE = (0.25, 0.75)  # phase model probabilities in here get the "check the and" note (half the errors, 4% of maps)
+
+
+def steady_phase(o: Onsets, pcm, sr, ch, steady: list[Segment]) -> tuple[list[Segment], float | None]:
+    """Move each steady section by half a beat where the phase trees say the beat is on its "and".
+
+    Returns the sections and the main section's P(phase kept), None without the model.
+    """
+    if pcm is None or not steady or not PHASE_TREES.exists():
+        return steady, None
+    st = sorted(steady, key=lambda s: s.time)
+    starts = [s.time - OSU_OFFSET_MS for s in st]
+    ends = starts[1:] + [o.times[-1] + 1]
+    main = int(np.argmax([e - a for a, e in zip(starts, ends)]))
+    probs = {}
+    for i, s in enumerate(st):
+        if i == main or (ends[i] - starts[i]) / s.beat_length >= PHASE_MIN_BEATS:
+            lo = starts[i] if i > 0 else o.times[0]
+            probs[i] = phase_keep_prob(phase_features(o, pcm, sr, ch, starts[i], s.beat_length, lo, ends[i]))
+    out = [Segment(s.time + s.beat_length / 2, s.beat_length, s.meter) if probs.get(i, probs[main]) < 0.5 else s
+           for i, s in enumerate(st)]
+    return out, probs[main]
+
+
+def detect_full(o: Onsets, pcm=None, sr=None, downbeat_ms: float | None = None, info: dict | None = None) -> list[Segment]:
     """Steady detector, then the beat tracker wherever the tempo really moves.
 
-    Steady red lines come first (precise and phase-consistent). The tracker runs
-    on beat probabilities around their main tempo and its beats are smoothed
-    through all onsets; combine() decides where they replace the steady grid.
+    Steady red lines come first (precise and phase-consistent), each on the beat
+    the phase trees pick. The tracker runs on beat probabilities around their
+    main tempo and its beats are smoothed through all onsets; combine() decides
+    where they replace the steady grid. info, if given, gets "phase_keep": the
+    phase model's confidence for the main section.
     """
     from .beatprob import beat_prob
     from .track import fine_sections, track_beats
@@ -685,7 +738,9 @@ def detect_full(o: Onsets, pcm=None, sr=None, downbeat_ms: float | None = None) 
         from .downbeat import chroma
 
         ch = chroma(pcm, sr)
-    steady = detect_onsets(o)
+    steady, phase_keep = steady_phase(o, pcm, sr, ch, detect_onsets(o))
+    if info is not None:
+        info["phase_keep"] = phase_keep
     # a mapper who knows where "1" is (osu! time) overrides the guess
     anchor = downbeat_anchor(o, steady, ch) if downbeat_ms is None else downbeat_ms - OSU_OFFSET_MS
     if o.profile is None or o.times[-1] - o.times[0] < TRACK_MIN_MS:
@@ -953,6 +1008,54 @@ def phase_opinions(o: Onsets, pcm, sr, phi: float, L: float, lo: float, hi: floa
     return kick(phi) >= kick(phi + L / 2), score > 0
 
 
+PHASE_TREES = Path(__file__).resolve().parent / "models" / "phase_trees.npz"
+
+
+def phase_features(o: Onsets, pcm, sr, ch, phi: float, L: float, lo: float, hi: float) -> dict:
+    """Evidence that the beat is at phi rather than phi + L/2: each feature is "on the beat" minus
+    "on the and" (band-group onset mass, broadband hits, loudness, harmonic change, the loudest
+    hits and the song's first hit, the kick rule)."""
+    from .downbeat import _chroma_change
+
+    h = phi + L / 2
+    a = octave_features(o, phi, L, lo, hi) | broadband_features(o, phi, L, lo, hi)
+    b = octave_features(o, h, L, lo, hi) | broadband_features(o, h, L, lo, hi)
+    f = {f"d_{k}": a[k] - b[k] for k in a if k not in ("log2_rel", "log2_rel_sq", "density")}
+    if pcm is not None:
+        f |= loudness_on_beat(pcm, sr, phi, L, lo, hi)
+    grid = lambda p: p + np.arange(np.ceil((lo - p) / L), np.floor((hi - p) / L)) * L
+    f["d_chroma"] = _chroma_change(ch, grid(phi), L) - _chroma_change(ch, grid(h), L) if ch is not None else 0.0
+    sel = (o.times >= lo) & (o.times < hi)
+    t, s, wl, w = o.times[sel], o.strength[sel], (o.strength * (o.sub + 0.5 * o.low))[sel], weights(o)[sel]
+    on = lambda p, x: np.abs((x - p + L / 2) % L - L / 2) < min(20.0, L / 8)
+    top = s >= np.percentile(s, 98) if len(s) >= 50 else np.zeros(len(s), bool)
+    f["d_top"] = float(on(phi, t[top]).mean() - on(h, t[top]).mean()) if top.any() else 0.0
+    strong = np.flatnonzero(o.strength >= np.median(o.strength))
+    t0 = o.times[strong[0]] if len(strong) else None
+    f["d_first"] = 0.0 if t0 is None else float(on(phi, np.array([t0]))[0]) - float(on(h, np.array([t0]))[0])
+
+    def kick(p):
+        d = np.abs((t - p + L / 2) % L - L / 2)
+        hit = np.exp(-0.5 * (d / 6) ** 2)
+        return (wl * hit).sum() + 0.3 * (w * hit).sum()
+
+    f["d_kick"] = float(np.log((kick(phi) + 1e-6) / (kick(h) + 1e-6)))
+    return f
+
+
+def phase_keep_prob(f: dict) -> float | None:
+    """P(the beat is at phi, not phi + L/2) from the phase trees (bench/phase_trees_exp.py); a feature
+    vector and its negation are both scored so the answer can't depend on which candidate came first."""
+    if not PHASE_TREES.exists():
+        return None
+    from .beatprob import load_model, predict_proba
+
+    m = load_model(PHASE_TREES)
+    x = np.array([[f[k] for k in m["names"]]])
+    p = predict_proba(m, np.nan_to_num(np.concatenate([x, -x])))
+    return float((p[0] + 1 - p[1]) / 2)
+
+
 @dataclass
 class Timing:
     segments: list[Segment]  # red lines in osu! time
@@ -964,11 +1067,15 @@ def analyze(path, downbeat_ms: float | None = None) -> Timing:
     """Full analysis for users: red lines plus an honest flag when the beat phase is in doubt."""
     pcm, sr = decode_bass(path)
     o = onsets(pcm, sr)
-    segs = detect_full(o, pcm, sr, downbeat_ms)
+    info = {}
+    segs = detect_full(o, pcm, sr, downbeat_ms, info)
+    alt = [Segment(s.time + s.beat_length / 2, s.beat_length, s.meter) for s in segs]
+    if info.get("phase_keep") is not None:
+        p = info["phase_keep"]
+        return Timing(segs, phase_uncertain=PHASE_UNSURE[0] < p < PHASE_UNSURE[1], alt_segments=alt)
     starts = [s.time - OSU_OFFSET_MS for s in segs]  # back to the audio's own clock, like onset times
     ends = starts[1:] + [o.times[-1] + 1]
     main = max(range(len(segs)), key=lambda i: ends[i] - starts[i])
     lo = starts[main] if main > 0 else o.times[0]
     rule_keeps, model_keeps = phase_opinions(o, pcm, sr, starts[main], segs[main].beat_length, lo, ends[main])
-    alt = [Segment(s.time + s.beat_length / 2, s.beat_length, s.meter) for s in segs]
     return Timing(segs, phase_uncertain=rule_keeps != model_keeps, alt_segments=alt)

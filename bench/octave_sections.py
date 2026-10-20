@@ -42,6 +42,14 @@ def _one(args):
     from autotiming.grid import Segment, compare
 
     try:
+        if os.environ.get("OCTAVE_CROSSFIT") == "1":  # the octave model that never saw this song
+            import hashlib
+
+            from autotiming import detect as D
+
+            cf = HERE.parent / "data" / "octave_crossfit"
+            fold = json.loads((cf / "assign.json").read_text()).get(hashlib.md5(Path(it["audio"]).read_bytes()).hexdigest())
+            D.OCTAVE_TREES = cf / f"fold{fold}.npz" if fold is not None else D.OCTAVE_TREES
         o = load_onsets(it["id"])
         segs = choose_octave(o, [Segment(t, L) for t, L in raw])
         out = [Segment(s.time + OSU_OFFSET_MS, s.beat_length) for s in segs]
