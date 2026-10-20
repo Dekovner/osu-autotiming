@@ -11,6 +11,7 @@ import os
 from dataclasses import dataclass
 
 import numpy as np
+from numba import njit
 from scipy.ndimage import maximum_filter1d, median_filter, uniform_filter1d
 
 from .decode import decode_bass
@@ -122,16 +123,30 @@ def _phase(times, weights, L, sigma=8.0, res=0.5):
 
 
 def coherence(times, weights, Ls) -> np.ndarray:
-    """Sum over HARMONICS of the weighted resultant length of onset phases, per beat length.
+    """Sum over HARMONICS of the weighted resultant length of onset phases, per beat length."""
+    return _coherence(np.ascontiguousarray(times, np.float64), np.ascontiguousarray(weights, np.float64),
+                      np.ascontiguousarray(Ls, np.float64))
 
-    One complex exponential per (onset, L); the 1/2 and 1/4 harmonics are its
-    square and fourth power, which is far cheaper than three exp calls.
-    """
-    z = np.exp(2j * np.pi * times[:, None] / Ls[None, :])
-    w = weights[:, None]
-    z2 = z * z
-    return (np.abs((w * z).sum(axis=0)) + 0.5 * np.abs((w * z2).sum(axis=0))
-            + 0.25 * np.abs((w * (z2 * z2)).sum(axis=0)))
+
+@njit(cache=True)
+def _coherence(times, weights, Ls):
+    """One cos/sin per (onset, L); the 1/2 and 1/4 harmonics are its square and fourth
+    power. Compiled, it runs without the onset x L temporaries numpy would allocate."""
+    out = np.empty(len(Ls))
+    for j in range(len(Ls)):
+        k = 2 * np.pi / Ls[j]
+        r1 = i1 = r2 = i2 = r4 = i4 = 0.0
+        for n in range(len(times)):
+            a = k * times[n]
+            c, s = np.cos(a), np.sin(a)
+            c2, s2 = c * c - s * s, 2 * c * s
+            c4, s4 = c2 * c2 - s2 * s2, 2 * c2 * s2
+            w = weights[n]
+            r1 += w * c; i1 += w * s
+            r2 += w * c2; i2 += w * s2
+            r4 += w * c4; i4 += w * s4
+        out[j] = np.sqrt(r1 * r1 + i1 * i1) + 0.5 * np.sqrt(r2 * r2 + i2 * i2) + 0.25 * np.sqrt(r4 * r4 + i4 * i4)
+    return out
 
 
 def refine_period(times, weights, L0, span=0.015):

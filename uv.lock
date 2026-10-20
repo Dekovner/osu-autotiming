@@ -20,6 +20,7 @@ name = "autotiming"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "numba" },
     { name = "numpy" },
     { name = "requests" },
     { name = "scipy" },
@@ -35,6 +36,7 @@ baselines = [
 requires-dist = [
     { name = "essentia", marker = "extra == 'baselines'" },
     { name = "librosa", marker = "extra == 'baselines'", specifier = ">=0.10,<0.12" },
+    { name = "numba", specifier = ">=0.68.0" },
     { name = "numpy" },
     { name = "requests" },
     { name = "scipy" },

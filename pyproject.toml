@@ -3,7 +3,12 @@ name = "autotiming"
 version = "0.1.0"
 description = "Accurate BPM/offset/red-line detection for osu! maps"
 requires-python = ">=3.12,<3.13"
-dependencies = ["numpy", "scipy", "requests"]
+dependencies = [
+    "numpy",
+    "scipy",
+    "requests",
+    "numba>=0.68.0",
+]
 
 [project.optional-dependencies]
 # competitors for the benchmark only

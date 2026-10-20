@@ -12,6 +12,7 @@
 from dataclasses import dataclass
 
 import numpy as np
+from numba import njit
 
 from .grid import Segment
 
@@ -91,38 +92,65 @@ def viterbi_beats(act: np.ndarray, min_interval: int, max_interval: int, prior_i
     # observation: beat state vs any other state
     log_beat = np.log(act)
     log_non = np.log((1 - act) / (OBS_LAMBDA - 1))
-    v = np.full(n_states, -np.inf)
     init = np.zeros(n_i) if log_p is None else -0.5 * ((log_i - log_p[0]) / 0.15) ** 2
+    if log_p is None:
+        log_p = np.full(len(act), np.nan)  # nan disables the per-beat tempo prior in the core
+    return _viterbi_core(log_beat, log_non, intervals, starts, ends, log_t, log_i, np.ascontiguousarray(log_p),
+                         init, TEMPO_PRIOR)
+
+
+@njit(cache=True)
+def _viterbi_core(log_beat, log_non, intervals, starts, ends, log_t, log_i, log_p, init, tempo_prior):
+    """Forward pass and backtrack of the bar-pointer HMM (compiled: ~50x the numpy loop)."""
+    n_t, n_i = len(log_beat), len(intervals)
+    n_states = ends[-1] + 1
+    v = np.empty(n_states)
+    nv = np.empty(n_states)
     for i in range(n_i):  # any phase is possible at the start
-        v[starts[i]:ends[i] + 1] = init[i] - np.log(intervals[i])
-    v += log_non[0]
-    v[starts] += log_beat[0] - log_non[0]
-    back = np.zeros((len(act), n_i), np.int16)
-    for t in range(1, len(act)):
-        from_end = v[ends][:, None] + log_t  # [from interval, to interval]
-        arg = from_end.argmax(axis=0)
-        best = from_end[arg, np.arange(n_i)]
-        if log_p is not None:
-            best = best - TEMPO_PRIOR * (log_i - log_p[t]) ** 2
-        v = np.roll(v, 1)
-        v[starts] = best
-        back[t] = arg
-        v += log_non[t]
-        v[starts] += log_beat[t] - log_non[t]
+        for st in range(starts[i], ends[i] + 1):
+            v[st] = init[i] - np.log(intervals[i]) + log_non[0]
+        v[starts[i]] += log_beat[0] - log_non[0]
+    back = np.zeros((n_t, n_i), np.int16)
+    best = np.empty(n_i)
+    for t in range(1, n_t):
+        for to in range(n_i):
+            m, arg = -np.inf, 0
+            for fr in range(n_i):
+                val = v[ends[fr]] + log_t[fr, to]
+                if val > m:
+                    m, arg = val, fr
+            if not np.isnan(log_p[t]):
+                d = log_i[to] - log_p[t]
+                m -= tempo_prior * d * d
+            best[to] = m
+            back[t, to] = arg
+        # advance every position by one frame; a beat starts each interval block
+        for i in range(n_i):
+            for st in range(starts[i] + 1, ends[i] + 1):
+                nv[st] = v[st - 1] + log_non[t]
+            nv[starts[i]] = best[i] + log_beat[t]
+        v, nv = nv, v
     # backtrack
-    state = int(np.argmax(v))
-    blk = int(np.searchsorted(starts, state, side="right") - 1)
+    state = 0
+    for st in range(n_states):
+        if v[st] > v[state]:
+            state = st
+    blk = 0
+    while blk + 1 < n_i and starts[blk + 1] <= state:
+        blk += 1
     pos = state - starts[blk]
-    beat_frames = []
-    for t in range(len(act) - 1, -1, -1):
+    frames = np.empty(n_t, np.int64)
+    n_beats = 0
+    for t in range(n_t - 1, -1, -1):
         if pos == 0:
-            beat_frames.append(t)
+            frames[n_beats] = t
+            n_beats += 1
             if t > 0:
-                blk = int(back[t, blk])
+                blk = back[t, blk]
                 pos = intervals[blk] - 1
         else:
             pos -= 1
-    return np.array(beat_frames[::-1])
+    return frames[:n_beats][::-1].copy()
 
 
 def refine(beat_ms: np.ndarray, o, tol_frac=0.15, tol_ms=25.0, weights=None) -> Beats:
