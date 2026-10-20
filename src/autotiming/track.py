@@ -299,6 +299,10 @@ HYBRID_MIN_RUN = 4  # beats: shorter switches to the tracker are noise
 # a whole run of tracked beats must also win on aggregate, or it is wobble (e.g. a quiet outro), not tempo
 RUN_MIN_GAIN = float(_env("RUN_MIN_GAIN", "0.4"))
 RUN_MIN_BEATS = int(_env("RUN_MIN_BEATS", "16"))
+RUN_SHIFT_MS = float(_env("RUN_SHIFT_MS", "24"))  # ...and beat the steady grid moved by up to this
+RUN_MIN_SHIFT_GAIN = float(_env("RUN_MIN_SHIFT_GAIN", "0.1"))  # by this much (single-line maps given extra lines: 3.8% -> 0%)
+SHIFTS = np.arange(-RUN_SHIFT_MS, RUN_SHIFT_MS + 0.5, 2.0)
+RUN_SHORT_SHIFT_GAIN = float(_env("RUN_SHORT_SHIFT_GAIN", "9"))  # a shorter run must beat the shifted grid by this
 SWITCH_TOL_MS = float(_env("SWITCH_TOL_MS", "10"))  # grids this close may hand over to each other
 SWITCH_MAX_EXTEND = int(_env("SWITCH_MAX_EXTEND", "16"))  # beats a tracked run may grow to reach such a point
 
@@ -349,7 +353,8 @@ def hybrid(o, steady: list[Segment], tracked: Beats, margin=HYBRID_MARGIN, reali
     sb = grid_beats(steady, start, end)
     if len(sb) < 4:
         return tracked
-    on_s = _on_grid(t, _quarters(sb), HYBRID_TOL_MS)
+    q_s = _quarters(sb)
+    on_s = _on_grid(t, q_s, HYBRID_TOL_MS)
     on_t = _on_grid(t, _quarters(tracked.times), HYBRID_TOL_MS)
     cw = np.cumsum(np.r_[0, w])
     cs, ct = np.cumsum(np.r_[0, w * on_s]), np.cumsum(np.r_[0, w * on_t])
@@ -367,8 +372,18 @@ def hybrid(o, steady: list[Segment], tracked: Beats, margin=HYBRID_MARGIN, reali
         while k2 < len(use_t) and use_t[k2]:
             k2 += 1
         a, b = lo[k], hi[k2 - 1]
-        gain = (ct[b] - ct[a] - (cs[b] - cs[a])) / (cw[b] - cw[a] + 1e-9)
-        if k2 - k < RUN_MIN_BEATS or gain < RUN_MIN_GAIN:
+        mass = cw[b] - cw[a] + 1e-9
+        gain = (ct[b] - ct[a] - (cs[b] - cs[a])) / mass
+        # the same grid a few ms later is not a tempo change: soft attacks (pads, a quiet
+        # intro or break) peak 5-25 ms late, and a free tracker follows them
+        shifted = max(np.sum(w[a:b] * _on_grid(t[a:b], q_s + d, HYBRID_TOL_MS)) for d in SHIFTS) / mass
+        gain_shift = (ct[b] - ct[a]) / mass - shifted
+        if _env("HYBRID_DEBUG"):
+            print(f"run {sb[k] - 20.4:.0f}-{sb[k2 - 1] - 20.4:.0f} beats {k2 - k} gain {gain:.2f} vs shifted {gain_shift:.2f} "
+                  f"steady {(cs[b] - cs[a]) / mass:.2f} shifted {shifted:.2f} tracked {(ct[b] - ct[a]) / mass:.2f}")
+        short_ok = gain_shift >= RUN_SHORT_SHIFT_GAIN  # a few beats of a clear tempo change (a ritardando into a new section)
+        long_ok = k2 - k >= RUN_MIN_BEATS and gain >= RUN_MIN_GAIN and gain_shift >= RUN_MIN_SHIFT_GAIN
+        if not (long_ok or short_ok):
             use_t[k:k2] = False
         k = k2
     # switch sources only where the two grids agree: a run ending while the tracker and the

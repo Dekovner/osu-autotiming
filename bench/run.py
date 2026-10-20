@@ -103,8 +103,11 @@ def run_one(method, item):
     return res
 
 
+TAG = os.environ.get("BENCH_TAG", "")  # results of a variant go to their own file
+
+
 def load(dataset, method):
-    f = RESULTS / f"{dataset}_{method}.jsonl"
+    f = RESULTS / f"{dataset}_{method}{TAG}.jsonl"
     return [json.loads(l) for l in f.open()] if f.exists() else []
 
 
@@ -142,7 +145,7 @@ def main():
             done = {r["id"] for r in load(args.dataset, method)}
             todo = [it for it in items if it["id"] not in done]
             print(f"{method}: {len(todo)} to run", flush=True)
-            with ProcessPoolExecutor(args.workers, initializer=os.nice, initargs=(15,)) as ex, (RESULTS / f"{args.dataset}_{method}.jsonl").open("a") as out:
+            with ProcessPoolExecutor(args.workers, initializer=os.nice, initargs=(15,)) as ex, (RESULTS / f"{args.dataset}_{method}{TAG}.jsonl").open("a") as out:
                 futs = [ex.submit(run_one, method, it) for it in todo]
                 for i, f in enumerate(as_completed(futs), 1):
                     out.write(json.dumps(f.result()) + "\n")
@@ -153,7 +156,7 @@ def main():
     if args.rescore:  # metric changed: recompute from cached predictions, no detection
         by_id = {it["id"]: it for it in items}
         for method in args.methods:
-            f = RESULTS / f"{args.dataset}_{method}.jsonl"
+            f = RESULTS / f"{args.dataset}_{method}{TAG}.jsonl"
             rows = load(args.dataset, method)
             with f.open("w") as out:
                 for r in rows:

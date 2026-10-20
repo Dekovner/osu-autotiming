@@ -617,6 +617,7 @@ def combine(o: Onsets, steady: list[Segment], tracked, anchor: float | None = No
         if len(hits):
             allowed = (np.arange(len(merged.times)) - hits[0]) % 4 == 0
     segs = sorted(lines(o, merged, line_cost=LINE_COST, sigma_ms=LINE_SIGMA_MS, allowed=allowed), key=lambda s: s.time)
+    segs = [steady_twin(s, phys) for s in segs]
     if HYBRID_ACCEPT_GAIN >= 0:
         t, w = o.times, weights(o)
         gain4 = piecewise_excess(t, w, segs, tol=4.0) - piecewise_excess(t, w, phys, tol=4.0)
@@ -626,14 +627,38 @@ def combine(o: Onsets, steady: list[Segment], tracked, anchor: float | None = No
     return [Segment(s.time + OSU_OFFSET_MS, s.beat_length, s.meter) for s in segs]
 
 
+TWIN_TEMPO, TWIN_MS = float(_env("TWIN_TEMPO", "0.002")), 5.0
+
+
+def steady_twin(s: Segment, phys: list[Segment]) -> Segment:
+    """A hybrid line that is a steady section's grid (same tempo within 0.2%, on its beats) gets that
+    grid's exact values: the steady fit over the whole section is the tighter one (184.997, not 185.031)."""
+    starts = [p.time for p in phys]
+    p = phys[max(0, int(np.searchsorted(starts, s.time + TWIN_MS, side="right")) - 1)]
+    if abs(np.log(s.beat_length / p.beat_length)) > TWIN_TEMPO:
+        return s
+    t = p.time + np.round((s.time - p.time) / p.beat_length) * p.beat_length
+    return Segment(float(t), p.beat_length, s.meter) if abs(t - s.time) <= TWIN_MS else s
+
+
+ALIGN_PREV_W = float(_env("ALIGN_PREV_W", "0.5"))
+
+
 def align_octave(secs: list[Segment], steady: list[Segment]) -> list[Segment]:
-    """Scale each section (onset clock) by x0.5/x1/x2 to sit closest to the steady tempo at its start."""
+    """Scale each section (onset clock) by x0.5/x1/x2 to sit closest to the steady tempo at its start,
+    and (weight ALIGN_PREV_W) to the section before it.
+
+    The second term is for ritardandos the steady lines don't see: 165 -> 150 after
+    a steady 220 must not become 165 -> 300, though 300 is nearer 220 than 150 is.
+    """
     st = sorted(steady, key=lambda s: s.time)
     starts = np.array([s.time - OSU_OFFSET_MS for s in st])
     out = []
     for s in secs:
         ref = st[max(0, int(np.searchsorted(starts, s.time, side="right")) - 1)].beat_length
-        k = min((0.5, 1.0, 2.0), key=lambda k: abs(np.log(s.beat_length / k / ref)))
+        prev = out[-1].beat_length if out else ref
+        k = min((0.5, 1.0, 2.0), key=lambda k: abs(np.log(s.beat_length / k / ref))
+                + ALIGN_PREV_W * abs(np.log(s.beat_length / k / prev)))
         out.append(Segment(s.time, s.beat_length / k, s.meter))
     return out
 
@@ -664,12 +689,12 @@ def detect_full(o: Onsets, pcm=None, sr=None, downbeat_ms: float | None = None) 
     # a mapper who knows where "1" is (osu! time) overrides the guess
     anchor = downbeat_anchor(o, steady, ch) if downbeat_ms is None else downbeat_ms - OSU_OFFSET_MS
     if o.profile is None or o.times[-1] - o.times[0] < TRACK_MIN_MS:
-        return snap_bpm(connect_lines(first_on_downbeat(steady, anchor, ch, o)), o.times[-1] + OSU_OFFSET_MS)
+        return connect_lines(snap_bpm(first_on_downbeat(steady, anchor, ch, o), o.times[-1] + OSU_OFFSET_MS))
     main_L = main_beat_length(o, steady)
     # the tracker expects each section at the octave the steady lines chose there
     secs = align_octave(fine_sections(o, main_L), steady)
     tracked = track_beats(o, secs, probs=beat_prob(o, main_L))
-    return snap_bpm(connect_lines(first_on_downbeat(combine(o, steady, tracked, anchor), anchor, ch, o)), o.times[-1] + OSU_OFFSET_MS)
+    return connect_lines(snap_bpm(first_on_downbeat(combine(o, steady, tracked, anchor), anchor, ch, o), o.times[-1] + OSU_OFFSET_MS))
 
 
 CONNECT_MAX_MS = 15.0  # a line further off the previous grid is a real reset, not a fitting gap
@@ -696,6 +721,8 @@ def connect_lines(segs: list[Segment]) -> list[Segment]:
     for i in range(m - 1):
         x = (segs[i + 1].time - segs[i].time) / segs[i].beat_length
         gap = abs(x - round(x)) * segs[i].beat_length
+        if gap < 1.0 and is_round(segs[i].bpm):
+            continue  # snap_bpm already put the next line where this rounded grid lands: keep the round BPM
         if round(x) >= 1 and gap <= CONNECT_MAX_MS and gap / round(x) <= CONNECT_MAX_MS_PER_BEAT:
             n[i], joined[i] = int(round(x)), True
     # joint least squares per chain of joined sections: the knots move so both neighbours'
@@ -733,36 +760,55 @@ SNAP_MAX_MS = float(os.environ.get("SNAP_MAX_MS", "5"))  # how far a rounded gri
 # (ranked: exact mapper BPM on 92% of single-BPM maps at 5 ms, coverage -1 point; a fitted 150.009 is noise)
 
 
+def is_round(bpm: float) -> bool:
+    return abs(bpm / SNAP_STEPS[-1] - round(bpm / SNAP_STEPS[-1])) < 1e-6
+
+
 def snap_bpm(segs: list[Segment], t_end: float) -> list[Segment]:
     """Round each section's BPM to the roundest value the audio allows (150.009 -> 150).
 
     Songs are produced at round tempos, so the last decimals are measurement
     noise, and mappers would retype them anyway. A rounding is taken when the
-    rounded grid stays within SNAP_MAX_MS of the fitted one over the section
-    (the first section may re-centre its offset to halve the drift). Line times
-    stay whole ms, and each next line moves to where the rounded grid lands, so
-    sections remain connected.
+    rounded grid stays within SNAP_MAX_MS of the fitted one over the section (a
+    line whose position is still free, the first one or one after a phase reset,
+    may move to centre that error). The next line then moves to where the rounded
+    grid lands (whole ms), so sections stay connected without bending the round
+    BPM, unless that moves a longer section by more than SNAP_MAX_MS: then this
+    one keeps its fitted BPM and connect_lines, which runs after and closes all
+    joints between unrounded lines, bends it instead.
     """
     segs = sorted(segs, key=lambda s: s.time)
-    out, prev_end = [], None
+    out, moved_to = [], None
     for i, s in enumerate(segs):
-        start = s.time if prev_end is None else prev_end
+        free = moved_to is None
+        st = s.time if free else moved_to
         nxt = segs[i + 1].time if i + 1 < len(segs) else None
-        n = round((nxt - s.time) / s.beat_length) if nxt is not None else max(1, int((t_end - start) / s.beat_length))
-        L = s.beat_length
+        n = round((nxt - s.time) / s.beat_length) if nxt is not None else max(1, int((t_end - st) / s.beat_length))
+        L, shift, moved_to = s.beat_length, 0.0, None
         for step in SNAP_STEPS:
             c = round(s.bpm / step) * step
             Lc = 60000.0 / c
-            drift = n * (Lc - L)
-            shift = -drift / 2 if i == 0 else 0.0  # only the first line may move to centre the error
-            if abs(drift + shift) <= SNAP_MAX_MS and abs(shift) <= SNAP_MAX_MS:
-                L, start = Lc, round(start + shift)
-                break
-        out.append(Segment(float(start), L, s.meter))
-        if nxt is not None:
-            # connected lines: the next one goes where this grid lands, unless that is a real reset
-            land = start + n * L
-            prev_end = float(round(land)) if abs(land - nxt) <= CONNECT_MAX_MS else float(round(nxt))
+            drift = n * (Lc - L)  # rounded grid minus fitted grid at the section's end
+            if not free:
+                if abs(drift) <= SNAP_MAX_MS:
+                    L = Lc
+                    break
+                continue
+            lo, hi = max(-SNAP_MAX_MS, -SNAP_MAX_MS - drift), min(SNAP_MAX_MS, SNAP_MAX_MS - drift)
+            if lo > hi:
+                continue
+            L, shift = Lc, -drift / 2
+            break
+        if nxt is not None and is_round(60000.0 / L):
+            land = round(st + shift) + n * L
+            nn = (segs[i + 2].time if i + 2 < len(segs) else t_end) - nxt  # the next section's length
+            if abs(land - nxt) > CONNECT_MAX_MS:
+                pass  # a real reset: the next line keeps its own phase
+            elif nn <= n * L or abs(land - nxt) <= SNAP_MAX_MS:
+                moved_to = float(round(land))
+            else:  # moving a longer grid that far costs more than bending this one: connect_lines bends it
+                L, shift = s.beat_length, 0.0
+        out.append(Segment(float(round(st + shift)), L, s.meter))
     return out
 
 

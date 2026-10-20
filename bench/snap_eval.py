@@ -26,8 +26,9 @@ def worker(dataset, method):
     cov0, cov1, c5_0, c5_1, round_ok, round_n = [], [], [], [], 0, 0
     for r in rows:
         it = items[r["id"]]
-        base = connect_lines([Segment(t, L) for t, L in r["pred"]])
-        snapped = snap_bpm(base, it["span"][1] + 2000)
+        raw = [Segment(t, L) for t, L in r["pred"]]
+        base = connect_lines(raw)
+        snapped = connect_lines(snap_bpm(raw, it["span"][1] + 2000))  # the pipeline's order
         a, b = compare(base, it["truth"], *it["span"]), compare(snapped, it["truth"], *it["span"])
         cov0.append(a["cover10"]); cov1.append(b["cover10"]); c5_0.append(a["cover5"]); c5_1.append(b["cover5"])
         if len(it["truth"]) == 1 and r["octave"] == 1:  # single-BPM maps with the right octave: exact BPM match?
