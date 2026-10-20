@@ -773,7 +773,7 @@ def snap_bpm(segs: list[Segment], t_end: float) -> list[Segment]:
     line whose position is still free, the first one or one after a phase reset,
     may move to centre that error). The next line then moves to where the rounded
     grid lands (whole ms), so sections stay connected without bending the round
-    BPM, unless that moves a longer section by more than SNAP_MAX_MS: then this
+    BPM, unless that moves a longer section by more than 2 ms: then this
     one keeps its fitted BPM and connect_lines, which runs after and closes all
     joints between unrounded lines, bends it instead.
     """
@@ -804,7 +804,7 @@ def snap_bpm(segs: list[Segment], t_end: float) -> list[Segment]:
             nn = (segs[i + 2].time if i + 2 < len(segs) else t_end) - nxt  # the next section's length
             if abs(land - nxt) > CONNECT_MAX_MS:
                 pass  # a real reset: the next line keeps its own phase
-            elif nn <= n * L or abs(land - nxt) <= SNAP_MAX_MS:
+            elif nn <= n * L or abs(land - nxt) <= 2.0:  # a longer grid may only move a hair
                 moved_to = float(round(land))
             else:  # moving a longer grid that far costs more than bending this one: connect_lines bends it
                 L, shift = s.beat_length, 0.0

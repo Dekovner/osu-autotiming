@@ -87,6 +87,8 @@ DATASETS = {
     "ranked": ranked_items,
     # sets nominated by auneu (taiko BN): offsets the user vouches for more than average ranked ones
     "nominated": lambda: ranked_items(DATA / "nominated"),
+    # maps mappers reported after testing the bot by hand (bench/make_feedback.py)
+    "feedback": lambda: ranked_items(DATA / "feedback"),
 }
 
 

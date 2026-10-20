@@ -302,7 +302,9 @@ RUN_MIN_BEATS = int(_env("RUN_MIN_BEATS", "16"))
 RUN_SHIFT_MS = float(_env("RUN_SHIFT_MS", "24"))  # ...and beat the steady grid moved by up to this
 RUN_MIN_SHIFT_GAIN = float(_env("RUN_MIN_SHIFT_GAIN", "0.1"))  # by this much (single-line maps given extra lines: 3.8% -> 0%)
 SHIFTS = np.arange(-RUN_SHIFT_MS, RUN_SHIFT_MS + 0.5, 2.0)
-RUN_SHORT_SHIFT_GAIN = float(_env("RUN_SHORT_SHIFT_GAIN", "9"))  # a shorter run must beat the shifted grid by this
+RUN_SHORT_SHIFT_GAIN = float(_env("RUN_SHORT_SHIFT_GAIN", "0.15"))  # a shorter run must beat the shifted grid by this
+RUN_SHORT_MIN_NET = float(_env("RUN_SHORT_MIN_NET", "0.05"))  # and bridge two steady tempos this far apart (log ratio): a ritardando into a new section
+RUN_SHORT_MAX_DEV = float(_env("RUN_SHORT_MAX_DEV", "0.35"))  # beyond this the tracker jumped an octave (x1.5, x2), no ritardando does in a few beats
 SWITCH_TOL_MS = float(_env("SWITCH_TOL_MS", "10"))  # grids this close may hand over to each other
 SWITCH_MAX_EXTEND = int(_env("SWITCH_MAX_EXTEND", "16"))  # beats a tracked run may grow to reach such a point
 
@@ -378,10 +380,25 @@ def hybrid(o, steady: list[Segment], tracked: Beats, margin=HYBRID_MARGIN, reali
         # intro or break) peak 5-25 ms late, and a free tracker follows them
         shifted = max(np.sum(w[a:b] * _on_grid(t[a:b], q_s + d, HYBRID_TOL_MS)) for d in SHIFTS) / mass
         gain_shift = (ct[b] - ct[a]) / mass - shifted
+        # how far the tracked tempo really leaves the steady one (4-beat average): a ritardando
+        # moves 3-10%, a tracker wobbling on the same tempo stays within ~1%
+        sel = (tracked.times >= sb[k] - L[k] / 2) & (tracked.times <= sb[k2 - 1] + L[k2 - 1] / 2)
+        iv = np.diff(tracked.times[sel])
+        dev = net = 0.0
+        if len(iv) >= 4:
+            ma = np.convolve(iv, np.ones(4) / 4, mode="valid")
+            dev = float(np.max(np.abs(np.log(ma / np.median(L[k:k2])))))
+            # net change across the run: a ritardando leads into a new tempo, a tracker slipping onto
+            # triplets for a few beats comes back to the one it left
+            net = float(abs(np.log(iv[-2:].mean() / iv[:2].mean())))
+        net_steady = float(abs(np.log(L[min(k2 + 1, len(L) - 1)] / L[max(k - 2, 0)])))
         if _env("HYBRID_DEBUG"):
             print(f"run {sb[k] - 20.4:.0f}-{sb[k2 - 1] - 20.4:.0f} beats {k2 - k} gain {gain:.2f} vs shifted {gain_shift:.2f} "
-                  f"steady {(cs[b] - cs[a]) / mass:.2f} shifted {shifted:.2f} tracked {(ct[b] - ct[a]) / mass:.2f}")
-        short_ok = gain_shift >= RUN_SHORT_SHIFT_GAIN  # a few beats of a clear tempo change (a ritardando into a new section)
+                  f"steady {(cs[b] - cs[a]) / mass:.2f} shifted {shifted:.2f} tracked {(ct[b] - ct[a]) / mass:.2f} "
+                  f"tempo dev {dev:.1%} net {net:.1%} net steady {net_steady:.1%}")
+        # a few beats of a clear tempo change (a ritardando into a new section)
+        short_ok = (gain_shift >= RUN_SHORT_SHIFT_GAIN and net_steady >= RUN_SHORT_MIN_NET
+                    and dev <= RUN_SHORT_MAX_DEV)
         long_ok = k2 - k >= RUN_MIN_BEATS and gain >= RUN_MIN_GAIN and gain_shift >= RUN_MIN_SHIFT_GAIN
         if not (long_ok or short_ok):
             use_t[k:k2] = False
