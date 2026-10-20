@@ -27,6 +27,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from baselines import METHODS  # noqa: E402
 
+from autotiming.detect import OSU_OFFSET_MS  # noqa: E402
 from autotiming.grid import Segment, compare  # noqa: E402
 from autotiming.osufile import read_osu  # noqa: E402
 
@@ -40,6 +41,8 @@ def synth_items():
             continue
         t = json.loads((d / "truth.json").read_text())
         for f, shift in t["shift_ms"].items():
+            # truth is the physical attack; expressed in osu!'s clock like ranked maps are
+            shift += OSU_OFFSET_MS
             segs = [Segment(s["time"] + shift, s["beat_length"], s["meter"]) for s in t["segments"]]
             yield {
                 "id": f"{d.name}/{f}", "audio": str(d / f), "truth": segs,

@@ -125,14 +125,19 @@ def make_song(rng, idx):
             for h in (0, 0.5) if rng.random() < 0.5 else (0,):
                 place(buf, pluck(rng.choice(scale), L / 1000 * 1.5, 0.008), t + h * L + j())
         elif style == "syncopated":
-            if pos == 0 or rng.random() < 0.2:
+            # house/trance-style: offbeat bass and loud offbeat stabs, kick only on 1 and 3
+            if pos in (0, 2):
                 place(buf, kick(rng), t + j())
-            for h in (0.25, 0.75):
-                if rng.random() < 0.7:
-                    place(buf, snare(rng) * 0.6, t + h * L + j())
+            if pos == 1 and rng.random() < 0.4:
+                place(buf, kick(rng) * 0.7, t + 0.75 * L + j())
+            if pos in (1, 3):
+                place(buf, snare(rng), t + j(), 0.8)
+            if rng.random() < 0.3:
+                place(buf, snare(rng) * 0.3, t + 0.25 * L + j())
             place(buf, hat(rng), t + 0.5 * L + j())
+            place(buf, pluck(rng.choice(scale) / 2, L / 1000 * 0.4), t + 0.5 * L + j(), 0.8)
             if rng.random() < 0.6:
-                place(buf, pluck(rng.choice(scale), L / 1000 * 0.6), t + 0.75 * L + j(), 0.7)
+                place(buf, pluck(rng.choice(scale) * 2, L / 1000 * 0.6), t + 0.75 * L + j(), 0.9)
     buf /= np.abs(buf).max() * 1.1
     return style, buf, segments, duration
 

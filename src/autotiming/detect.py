@@ -20,6 +20,13 @@ N_FFT = 1024
 N_BANDS = 64
 FLUX_LAG = 3  # frames: compare against 6 ms ago, robust to slow attacks / vibrato
 ONSET_BIAS_MS = 0.0  # calibrated on synthetic audio (see bench)
+# Ranked red lines sit ~20 ms before the physical attack in BASS-decoded audio,
+# for mp3 and ogg alike (bench/beat_profile.py, bench/bias.py). That's osu!'s
+# clock convention, so it's applied to the output, not to onset detection.
+OSU_OFFSET_MS = -20.4
+# mappers' default tempo octave: ranked BPM median is 170; picking the x0.5/x1/x2
+# closest to this matches ranked 86% of the time vs 57% for raw strongest tempo
+OCTAVE_CENTER_BPM = 175.0
 
 
 @dataclass
@@ -29,6 +36,7 @@ class Onsets:
     low: np.ndarray  # share of the onset's energy below ~200 Hz (kick/bass)
     env: np.ndarray  # full flux envelope, one value per hop_ms
     env_low: np.ndarray
+    sub: np.ndarray  # share below ~90 Hz: kick fundamentals, the most reliable beat cue
     hop_ms: float  # exact frame step (HOP_MS rounded to whole samples)
 
 
@@ -48,6 +56,7 @@ def onsets(pcm: np.ndarray, sr: int) -> Onsets:
     win = np.hanning(N_FFT).astype(np.float32)
     edges = _bands(sr)
     low_bands = np.searchsorted(np.geomspace(30, 16000, N_BANDS + 1), 200)
+    sub_bands = np.searchsorted(np.geomspace(30, 16000, N_BANDS + 1), 90)
     bands = np.empty((n_frames, N_BANDS), np.float32)
     step = 8192  # frames per chunk keeps memory flat on long songs
     for s in range(0, n_frames, step):
@@ -61,6 +70,7 @@ def onsets(pcm: np.ndarray, sr: int) -> Onsets:
     diff[FLUX_LAG:] = np.maximum(0, logb[FLUX_LAG:] - logb[:-FLUX_LAG])
     env = diff.sum(axis=1)
     env_low = diff[:, :low_bands].sum(axis=1)
+    env_sub = diff[:, :sub_bands].sum(axis=1)
 
     # peaks above a local adaptive threshold, at least 25 ms apart
     thresh = median_filter(env, size=int(400 / HOP_MS)) + 0.3 * uniform_filter1d(env, int(2000 / HOP_MS)) + 1e-6
@@ -73,7 +83,8 @@ def onsets(pcm: np.ndarray, sr: int) -> Onsets:
     times = (k + frac) * hop_ms - ONSET_BIAS_MS
     strength = env[k] - thresh[k]
     low = env_low[k] / (env[k] + 1e-9)
-    return Onsets(times, strength, low, env, env_low, hop_ms)
+    sub = env_sub[k] / (env[k] + 1e-9)
+    return Onsets(times, strength, low, env, env_low, sub, hop_ms)
 
 
 def tempo_candidates(env: np.ndarray, hop_ms: float, n: int = 6, lo_bpm=60, hi_bpm=400) -> list[float]:
@@ -138,7 +149,26 @@ def weights(o: Onsets) -> np.ndarray:
     return o.strength * (1 + 2 * o.low)  # kick/bass hits carry the beat
 
 
-def fit_grid(t, w, L0: float, subdiv: int = 4, span=0.015) -> tuple[float, float, float]:
+def beat_phase(t, w_low, w_all, phi, L, subdiv=4):
+    """Which of the `subdiv` grid shifts is the beat.
+
+    The loudest position is often an offbeat (snare + chord on the "and"), so
+    loudness alone picks the wrong phase on syncopated music. Kick/bass onsets
+    mark the beat far more reliably; overall mass only breaks ties.
+    """
+    q = L / subdiv
+    best, best_s = phi, -np.inf
+    for j in range(subdiv):
+        p = phi + j * q
+        d = np.abs((t - p + L / 2) % L - L / 2)
+        hit = np.exp(-0.5 * (d / 6) ** 2)
+        s = (w_low * hit).sum() + 0.3 * (w_all * hit).sum()
+        if s > best_s:
+            best, best_s = p, s
+    return best
+
+
+def fit_grid(t, w, L0: float, subdiv: int = 4, span=0.015, w_low=None) -> tuple[float, float, float]:
     """Refine (offset, beat_length) around a rough beat length. Returns (offset, L, score)."""
     L = refine_period(t, w, L0, span)
     phi = _phase(t, w, L)
@@ -156,6 +186,8 @@ def fit_grid(t, w, L0: float, subdiv: int = 4, span=0.015) -> tuple[float, float
         sw = np.sqrt(ww)
         (phi, q), *_ = np.linalg.lstsq(A * sw[:, None], tt * sw, rcond=None)
         L = q * subdiv
+    if w_low is not None:
+        phi = beat_phase(t, w_low, w, phi, L, subdiv)
     return float(phi % L), float(L), grid_excess(t, w, phi, L, subdiv)
 
 
@@ -229,12 +261,13 @@ def _boundary(t, w, a: Segment, b: Segment, lo, hi):
     return best
 
 
-def detect_onsets(o: Onsets) -> list[Segment]:
+def _detect_raw(o: Onsets) -> list[Segment]:
     t, w = o.times, weights(o)
+    wl = o.strength * (o.sub + 0.5 * o.low)
     # global pass: the beat octave of the strongest candidate anchors the local search
     best = None
     for L0 in tempo_candidates(o.env, o.hop_ms):
-        phi, L, score = fit_grid(t, w, L0)
+        phi, L, score = fit_grid(t, w, L0, w_low=wl)
         if best is None or score > best[2]:
             best = (phi, L, score)
     phi, L, _ = best
@@ -250,7 +283,7 @@ def detect_onsets(o: Onsets) -> list[Segment]:
         sel = (t >= lo) & (t <= hi)
         if sel.sum() < 8:
             continue
-        p, l, _ = fit_grid(t[sel], w[sel], float(np.median(Lpath[g])), span=0.006)
+        p, l, _ = fit_grid(t[sel], w[sel], float(np.median(Lpath[g])), span=0.006, w_low=wl[sel])
         segs.append(Segment(p, l))
         spans.append((lo, hi))
     if not segs:
@@ -263,7 +296,7 @@ def detect_onsets(o: Onsets) -> list[Segment]:
         dphi = (s.time - prev.time) % prev.beat_length
         if same_L and min(dphi, prev.beat_length - dphi) < 8:
             sel = (t >= mspans[-1][0]) & (t <= sp[1])
-            p, l, _ = fit_grid(t[sel], w[sel], prev.beat_length, span=0.002)
+            p, l, _ = fit_grid(t[sel], w[sel], prev.beat_length, span=0.002, w_low=wl[sel])
             merged[-1], mspans[-1] = Segment(p, l), (mspans[-1][0], sp[1])
         else:
             merged.append(s)
@@ -277,6 +310,32 @@ def detect_onsets(o: Onsets) -> list[Segment]:
             lo, hi = hi, lo
         out.append(Segment(_boundary(t, w, a, b, lo - WIN_HOP_MS, hi + WIN_HOP_MS), b.beat_length))
     return out
+
+
+def choose_octave(o: Onsets, segs: list[Segment]) -> list[Segment]:
+    """Rescale every red line by the same x0.5/x1/x2 so the main tempo looks like a mapper's pick."""
+    main = max(range(len(segs)), key=lambda i: (segs[i + 1].time if i + 1 < len(segs) else o.times[-1]) - segs[i].time)
+    bpm = segs[main].bpm
+    f = min((0.5, 1.0, 2.0), key=lambda k: abs(np.log(bpm * k / OCTAVE_CENTER_BPM)))
+    if f == 1.0:
+        return segs
+    if f == 2.0:
+        return [Segment(s.time, s.beat_length / 2, s.meter) for s in segs]
+    # halving: one of every two old beats becomes the beat; kick/bass decides which
+    wl, w = o.strength * (o.sub + 0.5 * o.low), weights(o)
+    out = []
+    for i, s in enumerate(segs):
+        end = segs[i + 1].time if i + 1 < len(segs) else o.times[-1] + 1
+        sel = (o.times >= s.time - 2 * s.beat_length) & (o.times < end)
+        L = 2 * s.beat_length
+        phi = beat_phase(o.times[sel], wl[sel], w[sel], s.time, L, subdiv=2) if sel.any() else s.time
+        out.append(Segment(phi if i == 0 else s.time + ((phi - s.time) % L), L, s.meter))
+    return out
+
+
+def detect_onsets(o: Onsets) -> list[Segment]:
+    segs = choose_octave(o, _detect_raw(o))
+    return [Segment(s.time + OSU_OFFSET_MS, s.beat_length, s.meter) for s in segs]
 
 
 def detect(path) -> list[Segment]:
