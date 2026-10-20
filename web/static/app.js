@@ -194,17 +194,10 @@ function renderSel() {
   }
 }
 
-// readout of the pointer: time and place in the bar
+// time under the pointer (or of the line being dragged), in a fixed-width slot so nothing reflows
 function renderHover() {
-  const el = $("hover");
-  if (hoverT === null || !lines.length) { el.innerHTML = ""; return; }
   const t = drag && drag.kind === "line" && drag.moved ? drag.line.time : hoverT;
-  const l = lines[lineAt(t)], d = div();
-  const beats = (t - l.time) / l.beat_length;
-  const bar = Math.floor(beats / l.meter), beat = Math.floor(beats - bar * l.meter);
-  const sub = Math.round((beats - Math.floor(beats)) * d) % d;
-  const where = t < lines[0].time ? "before the first red line" : `bar ${bar + 1} · beat ${beat + 1}${sub ? ` · +${sub}/${d}` : ""}`;
-  el.innerHTML = `<b>${fmtClock(t)}</b> ${Math.round(t)} ms · ${where}`;
+  $("hover").textContent = t === null ? "" : fmtClock(t);
 }
 
 function select(i) { sel = i; renderList(); renderSel(); draw(); }

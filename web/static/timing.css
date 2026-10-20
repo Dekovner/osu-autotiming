@@ -68,9 +68,7 @@ select { padding: 2px 4px; font-family: var(--mono); font-size: 0.78rem; }
 .bar .hint { opacity: .6; font-size: 0.7rem; }
 #play { color: var(--ink); min-width: 5ch; }
 .bar input[type=range] { width: 84px; accent-color: var(--don); }
-.bar .hover { min-width: 34ch; color: var(--muted); font-size: 0.75rem; }
-.bar .hover b { color: var(--ink); font-weight: 500; }
-.bar .hover i { font-style: normal; color: var(--kat); }
+.bar .hover { display: inline-block; width: 10ch; white-space: nowrap; color: var(--kat); font-size: 0.85rem; }
 
 .wave { display: block; width: 100%; height: 260px; border-top: 1px solid var(--faint); border-bottom: 1px solid var(--faint); cursor: crosshair; touch-action: none; }
 .overview { display: block; width: 100%; height: 34px; margin-bottom: 18px; border-bottom: 1px solid var(--faint); cursor: pointer; touch-action: none; }
