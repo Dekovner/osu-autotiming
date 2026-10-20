@@ -236,6 +236,94 @@ def lines(o, beats: Beats, line_cost=60.0, sigma_ms=2.5, polish_beats=16) -> lis
     return out
 
 
+HYBRID_TOL_MS = 6.0  # an onset is "on" a grid if within this of one of its quarter positions
+HYBRID_MARGIN = 0.10  # tracker must put this much more onset mass on its grid, locally
+HYBRID_MIN_RUN = 4  # beats: shorter switches to the tracker are noise
+
+
+def _quarters(beat_times: np.ndarray) -> np.ndarray:
+    """Beat and 1/4, 1/2, 3/4 positions between consecutive beats."""
+    a, b = beat_times[:-1], beat_times[1:]
+    q = a[:, None] + (b - a)[:, None] * np.array([0, 0.25, 0.5, 0.75])[None, :]
+    return np.concatenate([q.ravel(), beat_times[-1:]])
+
+
+def _on_grid(t: np.ndarray, grid: np.ndarray, tol: float) -> np.ndarray:
+    j = np.clip(np.searchsorted(grid, t), 1, len(grid) - 1)
+    return np.minimum(np.abs(t - grid[j - 1]), np.abs(t - grid[j])) < tol
+
+
+def _runs(mask: np.ndarray, min_run: int) -> np.ndarray:
+    """Drop True runs shorter than min_run and fill False gaps shorter than min_run."""
+    out = mask.copy()
+    for val in (False, True):  # close short gaps, then open short runs
+        i = 0
+        while i < len(out):
+            j = i
+            while j < len(out) and out[j] == out[i]:
+                j += 1
+            if out[i] == val and j - i < min_run and i > 0 and j < len(out):
+                out[i:j] = not val
+            i = j
+    return out
+
+
+def hybrid(o, steady: list[Segment], tracked: Beats, margin=HYBRID_MARGIN) -> Beats:
+    """Steady beats where a steady grid explains the onsets, tracked beats where it can't.
+
+    The steady detector's phase is consistent over the whole song, the tracker's
+    is not (it slides onto loud offbeats). Comparing both on quarter-note grids
+    makes a half-beat slide neither help nor hurt the tracker; where it does win
+    (rubato, drift, short tempo changes), its beats are used, moved back to the
+    steady phase if it sits on the "and".
+    """
+    from .detect import weights
+    from .grid import beats as grid_beats
+
+    t, w = o.times, weights(o)
+    if len(tracked.times) < 4 or not steady:
+        return tracked
+    start, end = min(t[0], tracked.times[0]), max(t[-1], tracked.times[-1])
+    sb = grid_beats(steady, start, end)
+    if len(sb) < 4:
+        return tracked
+    on_s = _on_grid(t, _quarters(sb), HYBRID_TOL_MS)
+    on_t = _on_grid(t, _quarters(tracked.times), HYBRID_TOL_MS)
+    cw = np.cumsum(np.r_[0, w])
+    cs, ct = np.cumsum(np.r_[0, w * on_s]), np.cumsum(np.r_[0, w * on_t])
+    L = np.diff(sb, append=sb[-1] + (sb[-1] - sb[-2]))
+    lo, hi = np.searchsorted(t, sb - 2 * L), np.searchsorted(t, sb + 2 * L)
+    mass = cw[hi] - cw[lo] + 1e-9
+    use_t = _runs((ct[hi] - ct[lo] - (cs[hi] - cs[lo])) / mass > margin, HYBRID_MIN_RUN)
+
+    out_t, out_s, k = [], [], 0
+    mids = (tracked.times[:-1] + tracked.times[1:]) / 2
+    while k < len(sb):
+        if not use_t[k]:
+            out_t.append(sb[k])
+            out_s.append(True)
+            k += 1
+            continue
+        k2 = k
+        while k2 < len(sb) and use_t[k2]:
+            k2 += 1
+        a, b = sb[k] - L[k] / 2, sb[k2 - 1] + L[k2 - 1] / 2
+        sel = (tracked.times >= a) & (tracked.times < b)
+        cand, sup = tracked.times[sel], tracked.supported[sel]
+        msel = (mids >= a) & (mids < b)
+        # back to the steady phase if the tracker sits on the "and" here
+        if len(cand) and msel.any() and abs(mids[msel][0] - sb[k]) < abs(cand[0] - sb[k]):
+            cand, sup = mids[msel], np.ones(msel.sum(), bool)
+        out_t.extend(cand)
+        out_s.extend(sup)
+        k = k2
+    times, sup = np.array(out_t), np.array(out_s)
+    order = np.argsort(times)
+    times, sup = times[order], sup[order]
+    keep = np.r_[True, np.diff(times) > 0.4 * np.median(np.diff(times))]  # seams can double a beat
+    return Beats(times[keep], sup[keep])
+
+
 def track_beats(o, sections: list[Segment]) -> Beats:
     """Beats tracked in one pass over the whole song, expecting each section's tempo in its span.
 

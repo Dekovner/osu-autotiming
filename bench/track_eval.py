@@ -25,7 +25,7 @@ from run import DATA, RESULTS, ranked_items  # noqa: E402
 
 from autotiming.detect import OSU_OFFSET_MS, _detect_raw, choose_octave  # noqa: E402
 from autotiming.grid import Segment, compare  # noqa: E402
-from autotiming.track import Beats, fine_sections, lines, track_beats  # noqa: E402
+from autotiming.track import HYBRID_MARGIN, Beats, fine_sections, hybrid, lines, track_beats  # noqa: E402
 
 BEATS = DATA / "beats"
 N_SINGLE = 80
@@ -70,13 +70,18 @@ def compute_beats(it):
 
 
 def compress(args):
-    it, params = args
+    it, params, steady_pred = args
     try:
         z = np.load(beats_file(it["id"]))
         b = Beats(z["times"], z["supported"])
         if len(b.times) < 2:
             return it["id"], {"cover5": 0, "cover10": 0, "lines": 0}
-        segs = lines(load_onsets(it["id"]), b, **params)
+        o = load_onsets(it["id"])
+        params = dict(params)
+        if params.pop("hybrid", False):
+            steady = sorted((Segment(tm - OSU_OFFSET_MS, L) for tm, L in steady_pred), key=lambda s: s.time)
+            b = hybrid(o, steady, b, margin=params.pop("margin", HYBRID_MARGIN))
+        segs = lines(o, b, **params)
         segs = [Segment(s.time + OSU_OFFSET_MS, s.beat_length) for s in segs]
         r = compare(segs, it["truth"], *it["span"])
         return it["id"], {"cover5": r.get("cover5", 0), "cover10": r.get("cover10", 0), "lines": len(segs)}
@@ -126,7 +131,7 @@ def main():
 
 def report(items, cur, params, workers):
     with ProcessPoolExecutor(workers) as ex:
-        res = dict(ex.map(compress, [(it, params) for it in items], chunksize=4))
+        res = dict(ex.map(compress, [(it, params, cur[it["id"]].get("pred", [])) for it in items], chunksize=4))
     by = defaultdict(list)
     for it in items:
         by[it["style"]].append(it)
