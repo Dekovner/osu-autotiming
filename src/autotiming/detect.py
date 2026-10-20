@@ -496,7 +496,16 @@ def choose_octave(o: Onsets, segs: list[Segment]) -> list[Segment]:
     return out
 
 
+class NoRhythmError(ValueError):
+    """The audio has (almost) no onsets: silence, a drone, a broken file."""
+
+
+MIN_ONSETS = 16
+
+
 def detect_onsets(o: Onsets) -> list[Segment]:
+    if len(o.times) < MIN_ONSETS:
+        raise NoRhythmError(f"only {len(o.times)} onsets found: nothing to time")
     segs = choose_octave(o, _detect_raw(o))
     return [Segment(s.time + OSU_OFFSET_MS, s.beat_length, s.meter) for s in segs]
 
@@ -519,14 +528,75 @@ def sharpen(o: Onsets, fine: Onsets) -> Onsets:
     return Onsets(times, o.strength, o.low, o.env, o.env_low, o.sub, o.hop_ms, o.profile)
 
 
-def detect(path, fine: bool | None = None) -> list[Segment]:
+TRACK_MIN_MS = 20000.0  # shorter audio: the steady detector alone
+_env = os.environ.get  # bench sweeps override these; defaults are the chosen values
+TRACK_MIN_SHARE = float(_env("TRACK_MIN_SHARE", "0.0"))  # tracked share below this: keep steady lines
+# accept the hybrid only if its onset fit beats the steady one by this (at 8 ms) and at all (at 4 ms);
+# -1 disables the check (per-run checks inside hybrid() may make it unnecessary)
+HYBRID_ACCEPT_GAIN = float(_env("HYBRID_ACCEPT_GAIN", "-1"))
+LINE_COST = float(_env("LINE_COST", "30"))  # red-line compression of hybrid beats
+LINE_SIGMA_MS = float(_env("LINE_SIGMA_MS", "3"))
+
+
+def combine(o: Onsets, steady: list[Segment], tracked) -> list[Segment]:
+    """Final red lines from the steady lines (osu! clock) and tracked beats (onset clock).
+
+    The hybrid keeps steady beats wherever a steady grid holds the onsets. If it
+    never needed the tracker, the steady lines are returned untouched; otherwise
+    the merged beats are compressed into red lines, which must also buy a better
+    onset fit than the steady lines.
+    """
+    from .track import hybrid, lines
+
+    if tracked is None or len(tracked.times) < 4:
+        return steady
+    phys = sorted([Segment(s.time - OSU_OFFSET_MS, s.beat_length, s.meter) for s in steady], key=lambda s: s.time)
+    merged = hybrid(o, phys, tracked)
+    if merged.tracked_share <= TRACK_MIN_SHARE:  # a steady song: keep its lines exactly
+        return steady
+    segs = sorted(lines(o, merged, line_cost=LINE_COST, sigma_ms=LINE_SIGMA_MS), key=lambda s: s.time)
+    if HYBRID_ACCEPT_GAIN >= 0:
+        t, w = o.times, weights(o)
+        gain4 = piecewise_excess(t, w, segs, tol=4.0) - piecewise_excess(t, w, phys, tol=4.0)
+        gain8 = piecewise_excess(t, w, segs, tol=8.0) - piecewise_excess(t, w, phys, tol=8.0)
+        if gain4 <= 0 or gain8 <= HYBRID_ACCEPT_GAIN:
+            return steady
+    return [Segment(s.time + OSU_OFFSET_MS, s.beat_length, s.meter) for s in segs]
+
+
+def main_beat_length(o: Onsets, steady: list[Segment]) -> float:
+    starts = sorted(s.time - OSU_OFFSET_MS for s in steady)
+    ends = starts[1:] + [o.times[-1]]
+    longest = int(np.argmax([e - s for s, e in zip(starts, ends)]))
+    return sorted(steady, key=lambda s: s.time)[longest].beat_length
+
+
+def detect_full(o: Onsets) -> list[Segment]:
+    """Steady detector, then the beat tracker wherever the tempo really moves.
+
+    Steady red lines come first (precise and phase-consistent). The tracker runs
+    on beat probabilities around their main tempo and its beats are smoothed
+    through all onsets; combine() decides where they replace the steady grid.
+    """
+    from .beatprob import beat_prob
+    from .track import fine_sections, track_beats
+
+    steady = detect_onsets(o)
+    if o.profile is None or o.times[-1] - o.times[0] < TRACK_MIN_MS:
+        return steady
+    main_L = main_beat_length(o, steady)
+    tracked = track_beats(o, fine_sections(o, main_L), probs=beat_prob(o, main_L))
+    return combine(o, steady, tracked)
+
+
+def detect(path, fine: bool | None = None, steady_only: bool = False) -> list[Segment]:
     if fine is None:
         fine = os.environ.get("AUTOTIMING_FINE", "0") == "1"
     pcm, sr = decode_bass(path)
     o = onsets(pcm, sr)
     if fine:
         o = sharpen(o, onsets(pcm, sr, FINE_N_FFT, FINE_HOP_MS))
-    return detect_onsets(o)
+    return detect_onsets(o) if steady_only else detect_full(o)
 
 
 # Second opinion on the half-beat phase: logistic model over spectral placement,
@@ -628,7 +698,7 @@ def analyze(path) -> Timing:
     """Full analysis for users: red lines plus an honest flag when the beat phase is in doubt."""
     pcm, sr = decode_bass(path)
     o = onsets(pcm, sr)
-    segs = detect_onsets(o)
+    segs = detect_full(o)
     starts = [s.time - OSU_OFFSET_MS for s in segs]  # back to the audio's own clock, like onset times
     ends = starts[1:] + [o.times[-1] + 1]
     main = max(range(len(segs)), key=lambda i: ends[i] - starts[i])

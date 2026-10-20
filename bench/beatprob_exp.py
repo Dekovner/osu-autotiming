@@ -53,7 +53,7 @@ def build_one(args):
 
 def cmd_data(workers):
     OUT.mkdir(exist_ok=True)
-    cur = {r["id"]: r for r in map(json.loads, (RESULTS / "ranked_ours.jsonl").open())}
+    cur = {r["id"]: r for r in map(json.loads, (RESULTS / "ranked_ours_steady.jsonl").open())}
     todo = [(it, cur[it["id"]]["pred"]) for it in ranked_items()
             if path_for(it["id"]).exists() and cur.get(it["id"], {}).get("pred")]
     with ProcessPoolExecutor(workers) as ex:
@@ -107,8 +107,44 @@ def cmd_fit():
     np.savez_compressed(OUT / "crossfit.npz", **{i.replace("/", "__"): probs[i] for i in ids})
 
 
+MODEL_OUT = Path(__file__).resolve().parents[1] / "src" / "autotiming" / "models" / "beatprob_trees.npz"
+
+
+def cmd_final():
+    """Train on every map and export the trees as plain arrays (no sklearn needed to use them)."""
+    from sklearn.ensemble import HistGradientBoostingClassifier
+
+    groups = json.loads((OUT / "groups.json").read_text())
+    rng = np.random.default_rng(0)
+    Xs, ys = [], []
+    for i in sorted(groups):
+        z = np.load(OUT / (i.replace("/", "__") + ".npz"))
+        sel = rng.choice(len(z["y"]), min(len(z["y"]), 1500), replace=False)
+        Xs.append(z["X"][sel]); ys.append(z["y"][sel])
+    X, y = np.concatenate(Xs), np.concatenate(ys)
+    hgb = HistGradientBoostingClassifier(max_iter=300, learning_rate=0.08, max_leaf_nodes=31, l2_regularization=1.0).fit(X, y)
+    trees = [p[0].nodes for p in hgb._predictors]
+    n_nodes = np.array([len(t) for t in trees])
+    cat = np.concatenate(trees)
+    MODEL_OUT.parent.mkdir(exist_ok=True)
+    np.savez_compressed(
+        MODEL_OUT, n_nodes=n_nodes, feature=cat["feature_idx"].astype(np.int16), threshold=cat["num_threshold"],
+        left=cat["left"].astype(np.int32), right=cat["right"].astype(np.int32), leaf=cat["is_leaf"].astype(bool),
+        value=cat["value"], missing_left=cat["missing_go_to_left"].astype(bool),
+        baseline=np.atleast_1d(hgb._baseline_prediction).ravel()[:1], names=np.array(json.loads((OUT / "names.json").read_text())),
+    )
+    # the exported evaluator must agree with sklearn
+    from autotiming.beatprob import load_model, predict_proba
+
+    sample = X[rng.choice(len(X), 20000, replace=False)]
+    diff = np.abs(predict_proba(load_model(MODEL_OUT), sample) - hgb.predict_proba(sample)[:, 1]).max()
+    print(f"{len(trees)} trees, {cat.size} nodes -> {MODEL_OUT} ({MODEL_OUT.stat().st_size // 1024} KB); max |p - sklearn| = {diff:.2e}")
+
+
 if __name__ == "__main__":
     if sys.argv[1] == "data":
         cmd_data(int(sys.argv[2]) if len(sys.argv) > 2 else 12)
+    elif sys.argv[1] == "final":
+        cmd_final()
     else:
         cmd_fit()

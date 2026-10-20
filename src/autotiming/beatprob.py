@@ -6,9 +6,47 @@ ranked timing (bench/beatprob_exp.py) turns these features into a beat
 probability per onset.
 """
 
+from functools import cache
+from pathlib import Path
+
 import numpy as np
 
 from .detect import N_BANDS, Onsets
+
+MODEL_PATH = Path(__file__).resolve().parent / "models" / "beatprob_trees.npz"
+
+
+@cache
+def load_model(path=MODEL_PATH) -> dict:
+    """Boosted trees exported by bench/beatprob_exp.py final, as flat arrays."""
+    z = np.load(path)
+    m = {k: z[k] for k in z.files}
+    m["offsets"] = np.concatenate([[0], np.cumsum(m["n_nodes"])[:-1]])
+    return m
+
+
+def predict_proba(m: dict, X: np.ndarray) -> np.ndarray:
+    """P(beat) for each row: baseline + sum of tree leaves, through a sigmoid."""
+    raw = np.full(len(X), float(m["baseline"][0]))
+    rows = np.arange(len(X))
+    for off in m["offsets"]:
+        node = np.zeros(len(X), np.int64)
+        while True:
+            g = off + node
+            leaf = m["leaf"][g]
+            if leaf.all():
+                break
+            x = X[rows, m["feature"][g]]
+            go_left = np.where(np.isnan(x), m["missing_left"][g], x <= m["threshold"][g])
+            node = np.where(leaf, node, np.where(go_left, m["left"][g], m["right"][g]))
+        raw += m["value"][off + node]
+    return 1.0 / (1.0 + np.exp(-raw))
+
+
+def beat_prob(o: Onsets, L_est: float) -> np.ndarray:
+    """Probability that each onset falls on a beat (given the song's main beat length)."""
+    X, _ = onset_features(o, L_est)
+    return predict_proba(load_model(), X)
 
 BAND_EDGES = np.geomspace(30, 16000, N_BANDS + 1)
 GROUP_EDGES = [30, 60, 120, 250, 500, 1000, 2500, 6000, 16000]  # 8 timbre groups

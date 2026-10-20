@@ -16,7 +16,8 @@ from numba import njit
 
 from .grid import Segment
 
-FPS = int(__import__("os").environ.get("TRACK_FPS", "100"))  # tracker frame rate; beats are refined to onsets after
+_env = __import__("os").environ.get  # tunables below can be overridden for bench sweeps
+FPS = int(_env("TRACK_FPS", "100"))  # tracker frame rate; beats are refined to onsets after
 OBS_LAMBDA = 16.0  # how much a beat frame prefers onset activity (madmom's observation lambda)
 TRANSITION_LAMBDA = float(__import__("os").environ.get("TRACK_TLAMBDA", "60"))  # tempo-change stiffness: exp(-lambda * |ratio - 1|)
 TEMPO_PRIOR = 100.0  # per-beat cost of log(interval / section interval)^2: 10% off ~ 1 nat, 30% ~ 7
@@ -26,6 +27,7 @@ TEMPO_PRIOR = 100.0  # per-beat cost of log(interval / section interval)^2: 10% 
 class Beats:
     times: np.ndarray  # ms, in the onset clock
     supported: np.ndarray  # bool: an onset backs this beat (else it is interpolated)
+    tracked_share: float = 1.0  # after hybrid(): share of steady beats replaced by tracked ones
 
 
 # share of low-band (kick/bass) flux; 0.7 made tracked beats worse in every style
@@ -168,12 +170,18 @@ def refine(beat_ms: np.ndarray, o, tol_frac=0.15, tol_ms=25.0, weights=None) -> 
     return Beats(out, sup)
 
 
+SHORT_LINE_BEATS = 2  # a red line spanning fewer beats than this is "short"
+SHORT_LINE_COST = float(_env("SHORT_LINE_COST", "3"))  # x line_cost extra for a short line
+
+
 def segment(beats: Beats, line_cost=60.0, sigma_ms=2.5, max_len=4096) -> list[Segment]:
     """Fewest red lines that keep the grid on the beats (optimal partition by DP).
 
     Cost of a section = squared residuals of its supported beats around a
     straight line (time vs beat index), in units of sigma_ms, plus line_cost.
     Sections share their boundary beat, as a new red line starts on a beat.
+    A short section pays SHORT_LINE_COST x line_cost more: in rubato it can
+    still win, a one-beat blip inside a smooth tempo ramp does not.
     """
     x = np.arange(len(beats.times), dtype=float)
     y = beats.times
@@ -196,7 +204,7 @@ def segment(beats: Beats, line_cost=60.0, sigma_ms=2.5, max_len=4096) -> list[Se
     best[0] = 0.0
     for j in range(1, n):
         i = np.arange(max(0, j - max_len), j)
-        cost = best[i] + sse(i, j) / sigma_ms ** 2 + line_cost
+        cost = best[i] + sse(i, j) / sigma_ms ** 2 + line_cost * (1 + SHORT_LINE_COST * (j - i < SHORT_LINE_BEATS))
         k = int(np.argmin(cost))
         best[j], prev[j] = cost[k], i[k]
     bounds = [n - 1]
@@ -280,8 +288,11 @@ def lines(o, beats: Beats, line_cost=60.0, sigma_ms=2.5, polish_beats=16) -> lis
 
 
 HYBRID_TOL_MS = 6.0  # an onset is "on" a grid if within this of one of its quarter positions
-HYBRID_MARGIN = 0.10  # tracker must put this much more onset mass on its grid, locally
+HYBRID_MARGIN = float(_env("HYBRID_MARGIN", "0.2"))  # tracker must put this much more onset mass on its grid, locally
 HYBRID_MIN_RUN = 4  # beats: shorter switches to the tracker are noise
+# a whole run of tracked beats must also win on aggregate, or it is wobble (e.g. a quiet outro), not tempo
+RUN_MIN_GAIN = float(_env("RUN_MIN_GAIN", "0.4"))
+RUN_MIN_BEATS = int(_env("RUN_MIN_BEATS", "16"))
 
 
 def _quarters(beat_times: np.ndarray) -> np.ndarray:
@@ -311,7 +322,7 @@ def _runs(mask: np.ndarray, min_run: int) -> np.ndarray:
     return out
 
 
-def hybrid(o, steady: list[Segment], tracked: Beats, margin=HYBRID_MARGIN) -> Beats:
+def hybrid(o, steady: list[Segment], tracked: Beats, margin=HYBRID_MARGIN, realign=False) -> Beats:
     """Steady beats where a steady grid explains the onsets, tracked beats where it can't.
 
     The steady detector's phase is consistent over the whole song, the tracker's
@@ -338,6 +349,20 @@ def hybrid(o, steady: list[Segment], tracked: Beats, margin=HYBRID_MARGIN) -> Be
     lo, hi = np.searchsorted(t, sb - 2 * L), np.searchsorted(t, sb + 2 * L)
     mass = cw[hi] - cw[lo] + 1e-9
     use_t = _runs((ct[hi] - ct[lo] - (cs[hi] - cs[lo])) / mass > margin, HYBRID_MIN_RUN)
+    # judge each run of tracked beats as a whole
+    k = 0
+    while k < len(use_t):
+        if not use_t[k]:
+            k += 1
+            continue
+        k2 = k
+        while k2 < len(use_t) and use_t[k2]:
+            k2 += 1
+        a, b = lo[k], hi[k2 - 1]
+        gain = (ct[b] - ct[a] - (cs[b] - cs[a])) / (cw[b] - cw[a] + 1e-9)
+        if k2 - k < RUN_MIN_BEATS or gain < RUN_MIN_GAIN:
+            use_t[k:k2] = False
+        k = k2
 
     out_t, out_s, k = [], [], 0
     mids = (tracked.times[:-1] + tracked.times[1:]) / 2
@@ -355,7 +380,7 @@ def hybrid(o, steady: list[Segment], tracked: Beats, margin=HYBRID_MARGIN) -> Be
         cand, sup = tracked.times[sel], tracked.supported[sel]
         msel = (mids >= a) & (mids < b)
         # back to the steady phase if the tracker sits on the "and" here
-        if len(cand) and msel.any() and abs(mids[msel][0] - sb[k]) < abs(cand[0] - sb[k]):
+        if realign and len(cand) and msel.any() and abs(mids[msel][0] - sb[k]) < abs(cand[0] - sb[k]):
             cand, sup = mids[msel], np.ones(msel.sum(), bool)
         out_t.extend(cand)
         out_s.extend(sup)
@@ -364,7 +389,7 @@ def hybrid(o, steady: list[Segment], tracked: Beats, margin=HYBRID_MARGIN) -> Be
     order = np.argsort(times)
     times, sup = times[order], sup[order]
     keep = np.r_[True, np.diff(times) > 0.4 * np.median(np.diff(times))]  # seams can double a beat
-    return Beats(times[keep], sup[keep])
+    return Beats(times[keep], sup[keep], tracked_share=float(use_t.mean()))
 
 
 SMOOTH_LAMBDA = float(__import__("os").environ.get("TRACK_SMOOTH", "30"))  # stiffness of the tempo curve

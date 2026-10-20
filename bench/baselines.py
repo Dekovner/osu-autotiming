@@ -96,6 +96,13 @@ def ours(path) -> list[Segment]:
     return detect(path)
 
 
+def ours_steady(path) -> list[Segment]:
+    """The steady detector alone (before the beat tracker / hybrid)."""
+    from autotiming.detect import detect
+
+    return detect(path, steady_only=True)
+
+
 def ours_fine(path) -> list[Segment]:
     from autotiming.detect import detect
 
@@ -104,5 +111,5 @@ def ours_fine(path) -> list[Segment]:
 
 METHODS = {
     "librosa": librosa_beat, "essentia": essentia_rhythm, "timing_analyzer": timing_analyzer,
-    "ours": ours, "ours_fine": ours_fine,
+    "ours": ours, "ours_steady": ours_steady, "ours_fine": ours_fine,
 }

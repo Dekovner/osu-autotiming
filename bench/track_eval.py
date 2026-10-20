@@ -4,7 +4,7 @@
     uv run python bench/track_eval.py sweep [workers] '<json>'  # compress cached beats with params
 
 Styles from the ranked timing: single line, sections (>8 beats), bar-by-bar
-(2-8), beat-by-beat (<=2). "current" comes from data/results/ranked_ours.jsonl.
+(2-8), beat-by-beat (<=2). "current" comes from data/results/ranked_ours_steady.jsonl (steady detector alone).
 """
 
 import json
@@ -103,7 +103,7 @@ DEV_PER_STYLE = 15
 
 
 def items_and_current():
-    cur = {r["id"]: r for r in map(json.loads, (RESULTS / "ranked_ours.jsonl").open())}
+    cur = {r["id"]: r for r in map(json.loads, (RESULTS / "ranked_ours_steady.jsonl").open())}
     items, singles = [], []
     for it in ranked_items():
         if not path_for(it["id"]).exists() or it["id"] not in cur:
