@@ -92,16 +92,22 @@ def candidate_matrix(feats: list[dict]) -> np.ndarray:
     return np.concatenate([rel, rank, other, spread], axis=1)
 
 
-def downbeat_phase(o: Onsets, ch, phi: float, L: float, lo: float, hi: float) -> int:
-    """Which of the 4 beats from phi starts the bar. Boosted trees over bar features
-    (bench/downbeat_exp.py): 89% on ranked maps vs 85% for chroma change alone,
-    66% vs 47% where the harmony hardly moves (then rhythm decides)."""
+def downbeat_scores(o: Onsets, ch, phi: float, L: float, lo: float, hi: float) -> np.ndarray:
+    """Score per beat j = 0..3 from phi for "the bar starts here": the trees' probability, or
+    chroma change without the model."""
     from .beatprob import load_model, predict_proba
 
     feats = [bar_features(o, phi + j * L, L, lo, hi, ch=ch) for j in range(4)]
     if MODEL_PATH.exists():
-        return int(np.argmax(predict_proba(load_model(MODEL_PATH), candidate_matrix(feats))))
-    return int(np.argmax([f["chroma_change"] for f in feats]))
+        return np.asarray(predict_proba(load_model(MODEL_PATH), candidate_matrix(feats)), float)
+    return np.array([f["chroma_change"] for f in feats])
+
+
+def downbeat_phase(o: Onsets, ch, phi: float, L: float, lo: float, hi: float) -> int:
+    """Which of the 4 beats from phi starts the bar. Boosted trees over bar features
+    (bench/downbeat_exp.py): 89% on ranked maps vs 85% for chroma change alone,
+    66% vs 47% where the harmony hardly moves (then rhythm decides)."""
+    return int(np.argmax(downbeat_scores(o, ch, phi, L, lo, hi)))
 
 
 def _near(t, grid_times, tol):

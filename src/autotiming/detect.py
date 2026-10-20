@@ -559,6 +559,82 @@ def choose_octave(o: Onsets, segs: list[Segment]) -> list[Segment]:
     return out
 
 
+# Triplet feel: a song mapped at 161 BPM with 1/3 and 1/6 rhythms is, onset for onset,
+# also a straight 241.5 BPM song (its 1/2 and 1/4 are their 1/3 and 1/6), and the
+# x0.5/x1/x2 octave model never sees the 3:2 alternative. The tell is the accents:
+# onset mass piles up on a grid 1.5 beats long far more than on the beat itself.
+# log(concentration ratio) on 762 ranked maps: 10/10 mapped at 2/3 of our tempo
+# score 0.18..0.62 on all bands and >= 0.117 on kick and snare alike; of the 730 at
+# x0.5/x1/x2, none passes the three (all bands alone: up to 0.12, median -0.11;
+# in the full pipeline a 0.15 on all bands with a flat snare was a false 3:2).
+TRIPLET_MIN_GAIN = float(os.environ.get("TRIPLET_MIN_GAIN", "0.15"))
+TRIPLET_MIN_BAND_GAIN = 0.1  # kick (sub + low) and snare (mid) must each agree
+# ...and the main section must be a real part of the song: on tempo-chaos maps (main
+# section 23-30% of the song) a locally triplet-looking section turned 3:2 the lot;
+# true 3:2 maps with many lines still had 40-50%
+TRIPLET_MIN_MAIN_SHARE = float(os.environ.get("TRIPLET_MIN_MAIN_SHARE", "0.35"))
+TRIPLET_TOL_MS = 10.0
+
+
+def _grid_concentration(t, m, L, phi, tol=TRIPLET_TOL_MS) -> float:
+    """Share of mass m within tol of the grid (phi, L), relative to what a random grid would catch."""
+    d = np.abs(((t - phi) / L + 0.5) % 1.0 - 0.5) * L
+    return float(m[d < tol].sum() / (m.sum() + 1e-9) / (2 * tol / L))
+
+
+def triplet_phase(o: Onsets, phi: float, L: float, lo: float, hi: float) -> tuple[float, bool]:
+    """For grid (phi, L) in onset time: the best 1.5 L grid's phase, and whether accents favour it."""
+    sel = (o.times >= lo) & (o.times < hi)
+    if o.profile is None or sel.sum() < MIN_ONSETS:
+        return phi, False
+    t, prof = o.times[sel], o.profile[sel]
+    band = lambda a, b: prof[:, (OCTAVE_EDGES[:-1] >= a) & (OCTAVE_EDGES[:-1] < b)].sum(axis=1)
+    masses = [prof.sum(axis=1), band(0, OCTAVE_GROUPS["low"][1]), band(*OCTAVE_GROUPS["mid"])]
+    gains = []
+    for j, m in enumerate(masses):
+        c = [_grid_concentration(t, m, 1.5 * L, phi + k * L / 2) for k in range(3)]
+        if j == 0:
+            k_best = int(np.argmax(c))
+        gains.append(np.log((max(c) + 1e-9) / (_grid_concentration(t, m, L, phi) + 1e-9)))
+    yes = gains[0] > TRIPLET_MIN_GAIN and min(gains[1:]) > TRIPLET_MIN_BAND_GAIN
+    return phi + k_best * L / 2, bool(yes)
+
+
+def triplet_beats(o: Onsets, segs: list[Segment], downbeat_ms: float | None = None) -> tuple[list[Segment], bool]:
+    """Turn every section into 1.5x-longer beats when the main section's accents fall every 1.5 beats
+    (osu! time in and out). A downbeat the user gave picks which third of the new beat is "1".
+
+    A triplet feel belongs to the song, so the main section decides for all: a
+    rubato section deciding alone was a false 3:2 in the bench. Returns the
+    sections and whether they changed.
+    """
+    if not segs:
+        return segs, False
+    segs = sorted(segs, key=lambda s: s.time)
+    starts = [s.time - OSU_OFFSET_MS for s in segs]
+    ends = starts[1:] + [o.times[-1] + 1]
+    main = int(np.argmax([e - a for a, e in zip(starts, ends)]))
+
+    def decide(i):
+        lo = starts[i] if i > 0 else o.times[0]
+        return triplet_phase(o, starts[i], segs[i].beat_length, lo, ends[i])
+
+    song = ends[-1] - min(starts[0], o.times[0])
+    if (ends[main] - starts[main]) / song < TRIPLET_MIN_MAIN_SHARE or not decide(main)[1]:
+        return segs, False
+    out = []
+    for i, s in enumerate(segs):
+        phi = decide(i)[0]
+        L = 1.5 * s.beat_length
+        if downbeat_ms is not None:  # the user's "1" is a beat: take the third of the grid it lies on
+            phi = starts[i] + np.round((downbeat_ms - OSU_OFFSET_MS - starts[i]) / (s.beat_length / 2)) * s.beat_length / 2
+        t = phi + OSU_OFFSET_MS
+        if i > 0:  # the line stays where the section starts, on the new grid's first beat there
+            t = s.time + (t - s.time) % L
+        out.append(Segment(float(t), L, s.meter))
+    return out, True
+
+
 class NoRhythmError(ValueError):
     """The audio has (almost) no onsets: silence, a drone, a broken file."""
 
@@ -617,7 +693,59 @@ def downbeat_anchor(o: Onsets, steady: list[Segment], ch) -> float | None:
     return float(b[downbeat_phase(o, ch, b[0], phys[k].beat_length, b[0], b[-1])])
 
 
-def combine(o: Onsets, steady: list[Segment], tracked, anchor: float | None = None) -> list[Segment]:
+RESYNC_MIN_BEATS = int(_env("RESYNC_MIN_BEATS", "32"))  # a steady section this long gets its own downbeat guess
+RESYNC = _env("RESYNC", "1") == "1"
+# the downbeat trees on one section alone: only when the best beat beats the runner-up by this
+# (probabilities); below it the count carried over from the previous section stays
+RESYNC_LOCAL_MARGIN = float(_env("RESYNC_LOCAL_MARGIN", "0.3"))
+
+
+def bar_allowed(o: Onsets, times: np.ndarray, phys: list[Segment], anchor: float, ch) -> np.ndarray | None:
+    """Downbeats among merged beats (onset clock): every 4th beat, the count re-synced on each steady section.
+
+    Counting 4 beats at a time from one anchor over the whole song breaks for good
+    once the tracker drops or adds a beat in a ramp: every later red line lands on
+    "2". So the count restarts on each steady section, from the anchor where the
+    section continues the anchor's grid, else from its own downbeat guess.
+    """
+    from .downbeat import downbeat_scores
+    from .grid import beats as grid_beats
+
+    ends = [p.time for p in phys[1:]] + [o.times[-1] + 1]
+    main = int(np.argmax([e - p.time for p, e in zip(phys, ends)]))
+    syncs = []
+    for k, p in enumerate(phys):
+        if k != main and not RESYNC:
+            continue
+        L, bar = p.beat_length, 4 * p.beat_length
+        db = None
+        if k == main or (abs(np.log(L / phys[main].beat_length)) < TWIN_TEMPO
+                         and abs((anchor - p.time + L / 2) % L - L / 2) < 10):
+            db = anchor
+        elif ch is not None and RESYNC_LOCAL_MARGIN < 1 and (ends[k] - p.time) / L >= RESYNC_MIN_BEATS:
+            b = grid_beats([p], max(p.time, o.times[0]), ends[k])
+            if len(b) >= 12:
+                sc = downbeat_scores(o, ch, b[0], L, b[0], b[-1])
+                top2 = np.sort(sc)[-2:]
+                if top2[1] - top2[0] >= RESYNC_LOCAL_MARGIN:
+                    db = float(b[int(np.argmax(sc))])
+        if db is None:
+            continue
+        lo = -np.inf if k == 0 or not RESYNC else p.time - L / 2
+        hi = np.inf if not RESYNC else ends[k]
+        d = np.abs((times - db + bar / 2) % bar - bar / 2)
+        hits = np.flatnonzero((times >= lo) & (times < hi) & (d < 10))
+        if len(hits):
+            syncs.append(int(hits[0]))
+    if not syncs:
+        return None
+    syncs = np.unique(syncs)
+    idx = np.arange(len(times))
+    last = syncs[np.maximum(0, np.searchsorted(syncs, idx, side="right") - 1)]
+    return (idx - last) % 4 == 0
+
+
+def combine(o: Onsets, steady: list[Segment], tracked, anchor: float | None = None, ch=None) -> list[Segment]:
     """Final red lines from the steady lines (osu! clock) and tracked beats (onset clock).
 
     The hybrid keeps steady beats wherever a steady grid holds the onsets. If it
@@ -635,13 +763,7 @@ def combine(o: Onsets, steady: list[Segment], tracked, anchor: float | None = No
         return steady
     allowed = None
     if anchor is not None:  # new red lines only on downbeats, like a mapper places them
-        # bars counted along the merged beats from the steady downbeat they share
-        main = max(range(len(phys)), key=lambda i: (phys[i + 1].time if i + 1 < len(phys) else o.times[-1]) - phys[i].time)
-        bar = 4 * phys[main].beat_length
-        d = np.abs((merged.times - anchor + bar / 2) % bar - bar / 2)
-        hits = np.flatnonzero(d < 10)
-        if len(hits):
-            allowed = (np.arange(len(merged.times)) - hits[0]) % 4 == 0
+        allowed = bar_allowed(o, merged.times, phys, anchor, ch)
     segs = sorted(lines(o, merged, line_cost=LINE_COST, sigma_ms=LINE_SIGMA_MS, allowed=allowed), key=lambda s: s.time)
     segs = [steady_twin(s, phys) for s in segs]
     if HYBRID_ACCEPT_GAIN >= 0:
@@ -744,12 +866,20 @@ def detect_full(o: Onsets, pcm=None, sr=None, downbeat_ms: float | None = None, 
     # a mapper who knows where "1" is (osu! time) overrides the guess
     anchor = downbeat_anchor(o, steady, ch) if downbeat_ms is None else downbeat_ms - OSU_OFFSET_MS
     if o.profile is None or o.times[-1] - o.times[0] < TRACK_MIN_MS:
-        return connect_lines(snap_bpm(first_on_downbeat(steady, anchor, ch, o), o.times[-1] + OSU_OFFSET_MS))
-    main_L = main_beat_length(o, steady)
-    # the tracker expects each section at the octave the steady lines chose there
-    secs = align_octave(fine_sections(o, main_L), steady)
-    tracked = track_beats(o, secs, probs=beat_prob(o, main_L))
-    return connect_lines(snap_bpm(first_on_downbeat(combine(o, steady, tracked, anchor), anchor, ch, o), o.times[-1] + OSU_OFFSET_MS))
+        segs = steady
+    else:
+        main_L = main_beat_length(o, steady)
+        # the tracker expects each section at the octave the steady lines chose there
+        secs = align_octave(fine_sections(o, main_L), steady)
+        tracked = track_beats(o, secs, probs=beat_prob(o, main_L))
+        segs = combine(o, steady, tracked, anchor, ch)
+    # 3:2 last: tracker, hybrid and downbeat model all work on the straight grid they were fitted on
+    segs, triplet = triplet_beats(o, segs, downbeat_ms)
+    if triplet and downbeat_ms is None:  # the old downbeat is on the straight grid: guess again on the new one
+        anchor = downbeat_anchor(o, segs, ch)
+    if info is not None:
+        info["triplet"] = triplet
+    return connect_lines(snap_bpm(first_on_downbeat(segs, anchor, ch, o), o.times[-1] + OSU_OFFSET_MS))
 
 
 CONNECT_MAX_MS = 15.0  # a line further off the previous grid is a real reset, not a fitting gap
