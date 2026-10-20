@@ -51,8 +51,8 @@ def synth_items():
             }
 
 
-def ranked_items():
-    for d in sorted((DATA / "sets").glob("*")):
+def ranked_items(root=None):
+    for d in sorted((root or DATA / "sets").glob("*")):
         if not (d / "ok").exists():
             continue
         by_audio = defaultdict(list)
@@ -82,7 +82,12 @@ def ranked_items():
             }
 
 
-DATASETS = {"synth": synth_items, "ranked": ranked_items}
+DATASETS = {
+    "synth": synth_items,
+    "ranked": ranked_items,
+    # sets nominated by auneu (taiko BN): offsets the user vouches for more than average ranked ones
+    "nominated": lambda: ranked_items(DATA / "nominated"),
+}
 
 
 def run_one(method, item):

@@ -86,16 +86,17 @@ def cmd_pick(args):
 
 
 def cmd_download(args):
-    picked = json.loads(PICK.read_text())
-    SETS.mkdir(exist_ok=True)
-    todo = [int(i) for i in picked if not (SETS / str(i) / "ok").exists()]
+    picked = json.loads(Path(args.pick).read_text()) if args.pick else json.loads(PICK.read_text())
+    sets = Path(args.out) if args.out else SETS
+    sets.mkdir(parents=True, exist_ok=True)
+    todo = [int(i) for i in picked if not (sets / str(i) / "ok").exists()]
     print(f"{len(todo)} to download")
     for n, set_id in enumerate(todo, 1):
         try:
             r = requests.get(f"{API}/d/{set_id}n", headers=UA, timeout=180)
             r.raise_for_status()
             z = zipfile.ZipFile(io.BytesIO(r.content))
-            d = SETS / str(set_id)
+            d = sets / str(set_id)
             d.mkdir(exist_ok=True)
             names = z.namelist()
             audio = set()
@@ -129,7 +130,9 @@ def main():
     pk.add_argument("--n", type=int, default=400)
     pk.add_argument("--seed", type=int, default=1)
     pk.add_argument("--dup-groups", type=int, default=150)
-    sub.add_parser("download")
+    dl = sub.add_parser("download")
+    dl.add_argument("--pick", help="json list/dict of set ids (default: data/pick.json)")
+    dl.add_argument("--out", help="directory for the sets (default: data/sets)")
     args = p.parse_args()
     {"meta": cmd_meta, "pick": cmd_pick, "download": cmd_download}[args.cmd](args)
 
