@@ -340,6 +340,13 @@ function applyVolumes() {
   try { localStorage.setItem("timing-vol", JSON.stringify([$("vol-music").value, $("vol-click").value])); } catch (e) { /* private mode */ }
 }
 
+function setPlayButton(on) {
+  const b = $("play");
+  b.classList.toggle("on", on);
+  b.querySelector(".ico").textContent = on ? "❚❚" : "▶";
+  b.querySelector(".lbl").textContent = on ? "pause" : "play";
+}
+
 function play() {
   if (!buffer) return;
   actx.resume();
@@ -356,7 +363,7 @@ function play() {
   playing = true;
   metroNext = cursor;
   source.onended = () => { if (playing && now() >= duration - 5) pause(); };
-  $("play").textContent = "pause";
+  setPlayButton(true);
   loop();
 }
 function pause() {
@@ -366,7 +373,7 @@ function pause() {
   try { source.stop(); } catch (e) { /* already stopped */ }
   for (const n of clicks) { try { n.stop(); } catch (e) { /* not started or done */ } }
   clicks = [];
-  $("play").textContent = "play";
+  setPlayButton(false);
   draw();
 }
 function seek(t) {

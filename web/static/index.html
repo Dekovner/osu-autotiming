@@ -6,7 +6,7 @@
 <title>auneu · timing</title>
 <meta name="description" content="Automatic osu! timing from audio: BPM, offset and red lines, with an editor to check and fine-tune them.">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="timing.css?v=5">
+<link rel="stylesheet" href="timing.css?v=6">
 </head>
 <body>
 <div class="intro">
@@ -28,7 +28,7 @@
 
 <section id="editor" class="editor" hidden>
   <div class="bar mono">
-    <button id="play" title="play / pause (space)">play</button>
+    <button id="play" class="play" title="play / pause (space)"><span class="ico">▶</span> <span class="lbl">play</span> <kbd>space</kbd></button>
     <span id="clock" class="clock">00:00:000</span>
     <span id="hover" class="hover" title="where the pointer is on the waveform"></span>
     <span class="sep"></span>
@@ -97,6 +97,6 @@
   </div>
 </section>
 
-<script src="app.js?v=8"></script>
+<script src="app.js?v=9"></script>
 </body>
 </html>

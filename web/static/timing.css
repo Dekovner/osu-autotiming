@@ -72,7 +72,17 @@ select { padding: 2px 4px; font-family: var(--mono); font-size: 0.78rem; }
 .bar .clock { color: var(--ink); font-size: 0.95rem; min-width: 8.5ch; }
 .bar .sep { flex: 1; }
 .bar .hint { opacity: .6; font-size: 0.7rem; }
-#play { color: var(--ink); min-width: 5ch; }
+/* the one control people must find: outlined in don red, filled while playing */
+.bar .play {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 12px; border: 1px solid var(--don); border-radius: 999px;
+  color: var(--ink); font-size: 0.82rem; transition: background .15s, color .15s;
+}
+.bar .play:hover { background: #f04b3c26; color: var(--ink); }
+.bar .play.on { background: var(--don); color: #fff; }
+.bar .play .ico { width: 1.1em; text-align: center; font-size: 0.75rem; }
+.bar .play kbd { font: inherit; font-size: 0.68rem; color: var(--muted); padding: 0 4px; border: 1px solid var(--faint); border-radius: 3px; }
+.bar .play.on kbd { color: #ffffffb0; border-color: #ffffff40; }
 .bar input[type=range] { width: 84px; accent-color: var(--don); }
 .bar .hover { display: inline-block; width: 10ch; white-space: nowrap; color: var(--kat); font-size: 0.85rem; }
 
