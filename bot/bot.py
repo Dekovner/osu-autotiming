@@ -2,8 +2,9 @@
 
     DISCORD_TOKEN=... python bot/bot.py
 
-One song is analysed at a time in a niced worker process (the VPS also runs a
-VPN); others wait in line. Replies in English: the server is international.
+Songs are analysed in BOT_WORKERS niced worker processes (default 1: a small
+VPS also running a VPN); others wait in line. Replies in English: the server is
+international.
 """
 
 import asyncio
@@ -22,6 +23,7 @@ log = logging.getLogger("redline")
 
 MAX_BYTES = int(os.environ.get("MAX_BYTES", str(30 * 1024 * 1024)))
 MAX_MINUTES = float(os.environ.get("MAX_MINUTES", "15"))
+WORKERS = int(os.environ.get("BOT_WORKERS", "1"))  # songs analysed at once (each single-threaded)
 AUDIO_EXT = {".mp3", ".ogg", ".wav"}
 INLINE_LINES = 20  # longer timings come as a file instead of a code block
 
@@ -96,7 +98,7 @@ class Redline(discord.Client):
     def __init__(self):
         super().__init__(intents=discord.Intents.default())
         self.tree = app_commands.CommandTree(self)
-        self.pool = ProcessPoolExecutor(max_workers=1, initializer=_worker_init)
+        self.pool = ProcessPoolExecutor(max_workers=WORKERS, initializer=_worker_init)
         self.waiting = 0
 
     async def setup_hook(self):
@@ -121,7 +123,7 @@ async def timing(interaction: discord.Interaction, audio: discord.Attachment, do
     if audio.size > MAX_BYTES:
         await interaction.response.send_message(f"That file is too big (limit {MAX_BYTES >> 20} MB).", ephemeral=True)
         return
-    ahead = client.waiting
+    ahead = max(0, client.waiting - WORKERS + 1)  # songs that must finish before this one starts
     client.waiting += 1
     await interaction.response.defer(thinking=True)
     if ahead:

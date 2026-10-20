@@ -5,8 +5,10 @@ services:
       dockerfile: bot/Dockerfile
     restart: unless-stopped
     env_file: .env          # DISCORD_TOKEN=..., optional DISCORD_GUILD_ID=... (chmod 600)
-    cpus: 1.0               # one core at most: the VPS also carries the VPN
-    mem_limit: 1g
+    environment:
+      BOT_WORKERS: 4        # songs at once; each takes one core and up to ~0.6 GB
+    cpus: 4.0               # the home server (12 threads) also runs game servers
+    mem_limit: 4g
     logging:
       options:
         max-size: "5m"
