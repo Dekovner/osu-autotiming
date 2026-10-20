@@ -1,0 +1,5 @@
+.venv/
+__pycache__/
+data/
+vendor/bass/*
+!vendor/bass/README.md
