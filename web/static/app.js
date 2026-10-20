@@ -462,7 +462,7 @@ function status(msg, err = false) {
 
 // upload, then ask once a second where the song is: in the queue, being analysed, or done
 async function analyseOnServer(form, name) {
-  const asJson = async (r) => r.json().catch(() => ({ error: `server error ${r.status}` }));
+  const asJson = async (r) => r.json().catch(() => ({ error: r.status === 413 ? TOO_BIG : `server error ${r.status}` }));
   let job = await asJson(await fetch(API, { method: "POST", body: form }));
   const id = job.job;
   while (!job.error && job.status !== "done") {
@@ -478,8 +478,16 @@ async function analyseOnServer(form, name) {
   return job;
 }
 
+const MAX_MB = 30;  // the server's limit (web/api.py MAX_BYTES); nginx turns away anything bigger
+const TOO_BIG = `file too big: the limit is ${MAX_MB} MB (about 15 minutes of audio); cut the song or export a smaller mp3`;
+
 async function load(file) {
   if (!file) return;
+  if (file.size > MAX_MB * 1024 * 1024) {  // say so at once instead of uploading 100+ MB for a refusal
+    $("drop").querySelector(".drop-name").textContent = file.name;
+    status(`${file.name} is ${Math.round(file.size / 1048576)} MB; ${TOO_BIG.replace("file too big: ", "")}`, true);
+    return;
+  }
   fileName = file.name;
   pause();
   status(`analysing ${file.name}… (a few seconds per minute of audio)`);
