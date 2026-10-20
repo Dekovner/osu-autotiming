@@ -1,0 +1,13 @@
+services:
+  bot:
+    build:
+      context: ..
+      dockerfile: bot/Dockerfile
+    restart: unless-stopped
+    env_file: .env          # DISCORD_TOKEN=..., optional DISCORD_GUILD_ID=... (chmod 600)
+    cpus: 1.0               # one core at most: the VPS also carries the VPN
+    mem_limit: 1g
+    logging:
+      options:
+        max-size: "5m"
+        max-file: "2"

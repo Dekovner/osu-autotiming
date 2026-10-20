@@ -27,8 +27,8 @@ def chroma(pcm: np.ndarray, sr: int, n_fft: int = 8192) -> np.ndarray:
     M[np.arange(use.sum()), pc] = 1
     win = np.hanning(n_fft).astype(np.float32)
     out = np.empty((n, 12), np.float32)
-    for s in range(0, n, 512):
-        e = min(n, s + 512)
+    for s in range(0, n, 128):  # chunked: a few MB of temporaries
+        e = min(n, s + 128)
         idx = (np.arange(s, e) * hop)[:, None] + np.arange(n_fft)[None, :]
         mag = np.abs(np.fft.rfft(pad[idx] * win, axis=1))[:, use]
         out[s:e] = np.log1p(mag) @ M

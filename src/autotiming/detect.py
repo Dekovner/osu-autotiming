@@ -54,23 +54,33 @@ def onsets(pcm: np.ndarray, sr: int, n_fft: int = N_FFT, hop_target_ms: float = 
     hop = int(round(sr * hop_target_ms / 1000))
     hop_ms = hop * 1000 / sr
     flux_lag = max(1, int(round(FLUX_LAG * HOP_MS / hop_ms)))  # same 6 ms whatever the hop
-    pad = np.concatenate([np.zeros(n_fft // 2, np.float32), pcm, np.zeros(n_fft, np.float32)])
-    n_frames = (len(pad) - n_fft) // hop
+    # frames are centred on k * hop; the signal is zero-padded by n_fft // 2 in front and n_fft behind,
+    # but only chunk by chunk: a padded copy of the whole song is another 100+ MB on long tracks
+    pcm = np.asarray(pcm, np.float32)
+    front = n_fft // 2
+    n_frames = (len(pcm) + front + n_fft - n_fft) // hop
     win = np.hanning(n_fft).astype(np.float32)
     edges = _bands(sr, n_fft)
     low_bands = np.searchsorted(np.geomspace(30, 16000, N_BANDS + 1), 200)
     sub_bands = np.searchsorted(np.geomspace(30, 16000, N_BANDS + 1), 90)
     bands = np.empty((n_frames, N_BANDS), np.float32)
-    step = 8192  # frames per chunk keeps memory flat on long songs
+    step = 2048  # frames per chunk: ~70 MB of temporaries, flat whatever the song length
     for s in range(0, n_frames, step):
         e = min(n_frames, s + step)
-        idx = (np.arange(s, e) * hop)[:, None] + np.arange(n_fft)[None, :]
-        mag = np.abs(np.fft.rfft(pad[idx] * win, axis=1))
+        a0 = s * hop - front  # first sample of this chunk in the signal's own indexing
+        seg = np.zeros((e - 1 - s) * hop + n_fft, np.float32)
+        lo, hi = max(0, a0), min(len(pcm), a0 + len(seg))
+        if hi > lo:
+            seg[lo - a0:hi - a0] = pcm[lo:hi]
+        idx = (np.arange(e - s) * hop)[:, None] + np.arange(n_fft)[None, :]
+        mag = np.abs(np.fft.rfft(seg[idx] * win, axis=1))
         cs = np.concatenate([np.zeros((e - s, 1), np.float32), np.cumsum(mag, axis=1, dtype=np.float32)], axis=1)
         bands[s:e] = (cs[:, edges[1:]] - cs[:, edges[:-1]]) / np.diff(edges)
-    logb = np.log1p(1000 * bands)
+    logb = np.log1p(np.multiply(bands, 1000, out=bands), out=bands)  # in place: one frames x bands array less
     diff = np.zeros_like(logb)
-    diff[flux_lag:] = np.maximum(0, logb[flux_lag:] - logb[:-flux_lag])
+    for a in range(flux_lag, len(logb), 65536):
+        b = min(len(logb), a + 65536)
+        diff[a:b] = np.maximum(0, logb[a:b] - logb[a - flux_lag:b - flux_lag])
     env = diff.sum(axis=1)
     env_low = diff[:, :low_bands].sum(axis=1)
     env_sub = diff[:, :sub_bands].sum(axis=1)
@@ -704,29 +714,43 @@ def broadband_features(o: Onsets, phi: float, L: float, lo: float, hi: float) ->
             "bb_quarter": bb[near(0.25) | near(0.75)].sum() / tot}
 
 
-def _power_env(x, sr):
-    e = x.astype(np.float64) ** 2
-    k = max(1, int(sr * 0.005))  # 5 ms boxcar
-    c = np.cumsum(np.concatenate([[0], e]))
-    return (c[k:] - c[:-k]) / k
+def _energy_ms(pcm, sr, sos=None, chunk=1 << 20) -> np.ndarray:
+    """Mean power per 1 ms of the (optionally filtered) signal, filtering in chunks with carried
+    state: a whole-song float64 filter output and its cumsum cost ~1 GB on a long track."""
+    from scipy.signal import sosfilt, sosfilt_zi
+
+    per_ms = sr / 1000.0
+    n_ms = int(len(pcm) / per_ms)
+    acc = np.zeros(n_ms + 2)
+    zi = None if sos is None else sosfilt_zi(sos) * 0.0
+    for a in range(0, len(pcm), chunk):
+        x = pcm[a:a + chunk].astype(np.float64)
+        if sos is not None:
+            x, zi = sosfilt(sos, x, zi=zi)
+        ms = np.minimum(((a + np.arange(len(x))) / per_ms).astype(np.int64), n_ms + 1)
+        lo_ms = ms[0]
+        acc[lo_ms:ms[-1] + 1] += np.bincount(ms - lo_ms, weights=x * x)
+    return acc[:n_ms] / per_ms
 
 
 def loudness_on_beat(pcm, sr, phi: float, L: float, lo: float, hi: float) -> dict:
     """How many dB louder the 40 ms after each beat are than after each "and" (all / <150 Hz / >2 kHz)."""
-    from scipy.signal import butter, sosfilt
+    from scipy.signal import butter
 
     beats = phi + np.arange(np.ceil((lo - phi) / L), np.floor((hi - phi) / L)) * L
 
     def folded(env, times):
-        idx = (times[:, None] + np.arange(0, 40)[None, :]) * sr / 1000
-        idx = idx[(idx[:, 0] > 0) & (idx[:, -1] < len(env))].astype(int)
+        idx = np.round(times[:, None] + np.arange(0, 40)[None, :]).astype(int)
+        idx = idx[(idx[:, 0] > 0) & (idx[:, -1] < len(env))]
         return float(10 * np.log10(env[idx].max(axis=1).mean() + 1e-12)) if len(idx) else 0.0
 
     out = {}
-    for name, sig in (("all", pcm),
-                      ("lo", sosfilt(butter(4, 150, "lowpass", fs=sr, output="sos"), pcm)),
-                      ("hi", sosfilt(butter(4, 2000, "highpass", fs=sr, output="sos"), pcm))):
-        env = _power_env(sig, sr)
+    for name, sos in (("all", None),
+                      ("lo", butter(4, 150, "lowpass", fs=sr, output="sos")),
+                      ("hi", butter(4, 2000, "highpass", fs=sr, output="sos"))):
+        e = _energy_ms(pcm, sr, sos)
+        c = np.cumsum(np.concatenate([[0.0], e]))
+        env = (c[5:] - c[:-5]) / 5  # 5 ms boxcar, as before but at 1 ms resolution
         out[f"loud_{name}"] = folded(env, beats) - folded(env, beats + L / 2)
     return out
 

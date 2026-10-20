@@ -7,13 +7,15 @@ Timing is only meaningful in osu!'s clock, so decode_bass is the reference.
 """
 
 import ctypes
+import os
 import subprocess
 from functools import cache
 from pathlib import Path
 
 import numpy as np
 
-BASS_DIR = Path(__file__).resolve().parents[2] / "vendor" / "bass"
+# libs/x86_64/libbass.so lives under this directory (the repo's vendor/bass, or AUTOTIMING_BASS_DIR in a deploy)
+BASS_DIR = Path(os.environ.get("AUTOTIMING_BASS_DIR", Path(__file__).resolve().parents[2] / "vendor" / "bass"))
 
 BASS_SAMPLE_FLOAT = 0x100
 BASS_STREAM_DECODE = 0x200000
@@ -45,6 +47,8 @@ def _bass():
     lib.BASS_ChannelGetData.argtypes = [ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32]
     lib.BASS_ChannelGetInfo.argtypes = [ctypes.c_uint32, ctypes.POINTER(BassChannelInfo)]
     lib.BASS_StreamFree.argtypes = [ctypes.c_uint32]
+    lib.BASS_ChannelGetLength.restype = ctypes.c_uint64
+    lib.BASS_ChannelGetLength.argtypes = [ctypes.c_uint32, ctypes.c_uint32]
     lib.BASS_SetConfig(BASS_CONFIG_MP3_OLDGAPS, 1)
     if not lib.BASS_Init(0, 44100, 0, None, None) and lib.BASS_ErrorGetCode() != 14:  # 14 = already
         raise RuntimeError(f"BASS_Init failed: {lib.BASS_ErrorGetCode()}")
@@ -60,18 +64,24 @@ def decode_bass(path) -> tuple[np.ndarray, int]:
     try:
         info = BassChannelInfo()
         lib.BASS_ChannelGetInfo(h, ctypes.byref(info))
-        chunks = []
+        # downmix each chunk straight into one preallocated mono array: holding the
+        # interleaved stereo and its copies cost ~3x the song in memory
+        n_bytes = lib.BASS_ChannelGetLength(h, 0)  # BASS_POS_BYTE; an estimate for some mp3s
+        out = np.empty(max(1, n_bytes // 4 // info.chans + 1), np.float32)
+        pos = 0
         buf = (ctypes.c_float * (1 << 18))()
         while True:
             n = lib.BASS_ChannelGetData(h, buf, ctypes.sizeof(buf) | BASS_DATA_FLOAT)
             if n == 0xFFFFFFFF or n == 0:
                 break
-            chunks.append(np.frombuffer(buf, dtype=np.float32, count=n // 4).copy())
+            mono = np.frombuffer(buf, dtype=np.float32, count=n // 4).reshape(-1, info.chans).mean(axis=1)
+            if pos + len(mono) > len(out):
+                out = np.resize(out, max(2 * len(out), pos + len(mono)))
+            out[pos:pos + len(mono)] = mono
+            pos += len(mono)
     finally:
         lib.BASS_StreamFree(h)
-    pcm = np.concatenate(chunks) if chunks else np.zeros(0, np.float32)
-    pcm = pcm.reshape(-1, info.chans).mean(axis=1)
-    return pcm.astype(np.float32), info.freq
+    return out[:pos].astype(np.float32, copy=False), info.freq
 
 
 def decode_ffmpeg(path, sr: int | None = None) -> tuple[np.ndarray, int]:

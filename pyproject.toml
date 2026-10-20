@@ -11,6 +11,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+bot = ["discord.py>=2.4"]
 # competitors for the benchmark only
 # librosa 1.0's numba beat tracker segfaults (__last_beat); 0.11 is the long-standing release
 baselines = ["librosa>=0.10,<0.12", "essentia"]
