@@ -45,8 +45,9 @@ print("\n".join(timing_lines(t.segments)))
 ## Discord bot
 
 `bot/` is a Discord bot with a `/timing audio [downbeat]` command. Put
-`DISCORD_TOKEN=...` in `bot/.env`, then `docker compose -p osu-timing-bot up -d --build`
-in `bot/`. `BOT_WORKERS` sets how many songs are analysed at once.
+`DISCORD_TOKEN=...` in `bot/.env`, then `docker compose -p osu-timing-bot --profile discord up -d --build`
+in `bot/` (without the profile only the site's `api` service starts). `BOT_WORKERS` sets how
+many songs are analysed at once.
 
 ## Benchmark
 
