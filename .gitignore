@@ -1,5 +1,6 @@
 .venv/
 __pycache__/
-data/
+data
+.claude/
 vendor/bass/*
 !vendor/bass/README.md

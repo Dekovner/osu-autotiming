@@ -5,6 +5,10 @@ description = "Accurate BPM/offset/red-line detection for osu! maps"
 requires-python = ">=3.12,<3.13"
 dependencies = ["numpy", "scipy", "requests"]
 
+[project.optional-dependencies]
+# competitors for the benchmark only
+baselines = ["librosa", "essentia"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
