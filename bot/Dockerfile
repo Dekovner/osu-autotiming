@@ -1,4 +1,5 @@
 # build from the repo root:  docker compose -f bot/compose.yml up -d --build
+# one image for both services: the Discord bot and the HTTP API behind auneu.space/timing
 FROM python:3.12-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends curl unzip \
@@ -17,6 +18,7 @@ COPY pyproject.toml ./
 COPY src ./src
 RUN pip install --no-cache-dir --no-deps .
 COPY bot ./bot
+COPY web/api.py ./web/api.py
 
 ENV PYTHONUNBUFFERED=1 AUTOTIMING_BASS_DIR=/opt/bass NUMBA_CACHE_DIR=/tmp/numba OMP_NUM_THREADS=1
 CMD ["python", "bot/bot.py"]

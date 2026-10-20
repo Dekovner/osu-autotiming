@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>auneu · timing</title>
+<meta name="description" content="Automatic osu! timing from audio: BPM, offset and red lines, with an editor to check and fine-tune them.">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="timing.css?v=1">
+</head>
+<body>
+<header class="top">
+  <a class="home" href="/">auneu</a>
+  <h1>timing</h1>
+  <p class="sub">red lines from audio · <span class="mono">BPM, offset, downbeats</span></p>
+</header>
+
+<section id="drop" class="drop">
+  <label class="drop-row">
+    <input id="file" type="file" accept=".mp3,.ogg,.wav,audio/mpeg,audio/ogg,audio/wav">
+    <span class="drop-name">drop a song here</span>
+    <span class="drop-meta mono">mp3 · ogg · wav · up to 30 MB, 15 min</span>
+  </label>
+  <p id="status" class="status mono" hidden></p>
+</section>
+
+<section id="editor" class="editor" hidden>
+  <div class="bar mono">
+    <button id="play" title="play / pause (space)">play</button>
+    <span id="clock" class="clock">00:00:000</span>
+    <span class="sep"></span>
+    <label title="playback speed ([ and ])">speed
+      <select id="rate"><option>0.25</option><option>0.5</option><option>0.75</option><option selected>1</option><option>1.25</option><option>1.5</option></select>
+    </label>
+    <label title="grid divisor">snap
+      <select id="div"><option value="1">1/1</option><option value="2">1/2</option><option value="3">1/3</option><option value="4" selected>1/4</option><option value="6">1/6</option><option value="8">1/8</option></select>
+    </label>
+    <label title="metronome (m)"><input id="metro" type="checkbox"> metronome</label>
+    <span class="sep"></span>
+    <span class="hint">wheel zoom · drag pan · click seek · drag a red line to move it</span>
+  </div>
+
+  <canvas id="wave" class="wave"></canvas>
+  <canvas id="overview" class="overview"></canvas>
+
+  <div class="cols">
+    <div class="lines-col">
+      <div class="col-head mono">
+        <span>red lines</span>
+        <span class="tools">
+          <button id="add" title="add a red line at the playhead (a)">+ add</button>
+          <button id="undo" title="undo (ctrl+z)">undo</button>
+          <button id="redo" title="redo (ctrl+shift+z)">redo</button>
+        </span>
+      </div>
+      <ol id="lines" class="rows lines"></ol>
+    </div>
+
+    <div class="sel-col" id="sel" hidden>
+      <div class="col-head mono"><span>selected line</span><button id="del" title="delete (del)">delete</button></div>
+      <div class="field">
+        <span class="k mono">time</span>
+        <button data-nudge="-10">−10</button><button data-nudge="-1">−1</button>
+        <input id="f-time" class="mono" inputmode="numeric">
+        <button data-nudge="1">+1</button><button data-nudge="10">+10</button>
+        <span class="u mono">ms</span>
+      </div>
+      <div class="field">
+        <span class="k mono">bpm</span>
+        <input id="f-bpm" class="mono" inputmode="decimal">
+        <button id="half" title="half the BPM">×½</button>
+        <button id="double" title="double the BPM">×2</button>
+        <button id="shift" title="move by half a beat: the grid was on the offbeat">½ beat</button>
+      </div>
+      <div class="field">
+        <span class="k mono">meter</span>
+        <input id="f-meter" class="mono" inputmode="numeric">
+        <span class="u mono">/4</span>
+      </div>
+      <p id="joint" class="joint mono" hidden></p>
+    </div>
+  </div>
+
+  <div class="out">
+    <div class="col-head mono">
+      <span>[TimingPoints] red lines</span>
+      <span class="tools"><button id="copy">copy</button><button id="again" title="load another song">new song</button></span>
+    </div>
+    <p id="notes" class="notes mono" hidden></p>
+    <textarea id="text" class="mono" readonly spellcheck="false"></textarea>
+  </div>
+</section>
+
+<script src="app.js?v=1"></script>
+</body>
+</html>

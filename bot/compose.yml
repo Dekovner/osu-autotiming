@@ -13,3 +13,21 @@ services:
       options:
         max-size: "5m"
         max-file: "2"
+
+  api:                      # HTTP API behind auneu.space/timing (the VPS reaches it through an SSH tunnel)
+    build:
+      context: ..
+      dockerfile: bot/Dockerfile
+    restart: unless-stopped
+    command: ["python", "web/api.py"]
+    environment:
+      API_HOST: 0.0.0.0
+      API_WORKERS: 3        # songs at once from the site
+    ports:
+      - "127.0.0.1:8431:8431"   # localhost only
+    cpus: 3.0
+    mem_limit: 3g
+    logging:
+      options:
+        max-size: "5m"
+        max-file: "2"
