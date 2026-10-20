@@ -538,7 +538,23 @@ LINE_COST = float(_env("LINE_COST", "30"))  # red-line compression of hybrid bea
 LINE_SIGMA_MS = float(_env("LINE_SIGMA_MS", "3"))
 
 
-def combine(o: Onsets, steady: list[Segment], tracked) -> list[Segment]:
+def downbeat_anchor(o: Onsets, steady: list[Segment], ch) -> float | None:
+    """A downbeat (onset clock) on the longest steady section, chosen once by harmonic change."""
+    if ch is None or not steady:
+        return None
+    from .downbeat import downbeat_phase
+    from .grid import beats as grid_beats
+
+    phys = sorted([Segment(s.time - OSU_OFFSET_MS, s.beat_length, s.meter) for s in steady], key=lambda s: s.time)
+    ends = [s.time for s in phys[1:]] + [o.times[-1]]
+    k = int(np.argmax([e - s.time for s, e in zip(phys, ends)]))
+    b = grid_beats([phys[k]], max(phys[k].time, o.times[0]), ends[k])
+    if len(b) < 12:
+        return None
+    return float(b[downbeat_phase(o, ch, b[0], phys[k].beat_length, b[0], b[-1])])
+
+
+def combine(o: Onsets, steady: list[Segment], tracked, anchor: float | None = None) -> list[Segment]:
     """Final red lines from the steady lines (osu! clock) and tracked beats (onset clock).
 
     The hybrid keeps steady beats wherever a steady grid holds the onsets. If it
@@ -554,7 +570,16 @@ def combine(o: Onsets, steady: list[Segment], tracked) -> list[Segment]:
     merged = hybrid(o, phys, tracked)
     if merged.tracked_share <= TRACK_MIN_SHARE:  # a steady song: keep its lines exactly
         return steady
-    segs = sorted(lines(o, merged, line_cost=LINE_COST, sigma_ms=LINE_SIGMA_MS), key=lambda s: s.time)
+    allowed = None
+    if anchor is not None:  # new red lines only on downbeats, like a mapper places them
+        # bars counted along the merged beats from the steady downbeat they share
+        main = max(range(len(phys)), key=lambda i: (phys[i + 1].time if i + 1 < len(phys) else o.times[-1]) - phys[i].time)
+        bar = 4 * phys[main].beat_length
+        d = np.abs((merged.times - anchor + bar / 2) % bar - bar / 2)
+        hits = np.flatnonzero(d < 10)
+        if len(hits):
+            allowed = (np.arange(len(merged.times)) - hits[0]) % 4 == 0
+    segs = sorted(lines(o, merged, line_cost=LINE_COST, sigma_ms=LINE_SIGMA_MS, allowed=allowed), key=lambda s: s.time)
     if HYBRID_ACCEPT_GAIN >= 0:
         t, w = o.times, weights(o)
         gain4 = piecewise_excess(t, w, segs, tol=4.0) - piecewise_excess(t, w, phys, tol=4.0)
@@ -571,7 +596,7 @@ def main_beat_length(o: Onsets, steady: list[Segment]) -> float:
     return sorted(steady, key=lambda s: s.time)[longest].beat_length
 
 
-def detect_full(o: Onsets) -> list[Segment]:
+def detect_full(o: Onsets, pcm=None, sr=None, downbeat_ms: float | None = None) -> list[Segment]:
     """Steady detector, then the beat tracker wherever the tempo really moves.
 
     Steady red lines come first (precise and phase-consistent). The tracker runs
@@ -581,12 +606,48 @@ def detect_full(o: Onsets) -> list[Segment]:
     from .beatprob import beat_prob
     from .track import fine_sections, track_beats
 
+    ch = None
+    if pcm is not None:
+        from .downbeat import chroma
+
+        ch = chroma(pcm, sr)
     steady = detect_onsets(o)
+    # a mapper who knows where "1" is (osu! time) overrides the guess
+    anchor = downbeat_anchor(o, steady, ch) if downbeat_ms is None else downbeat_ms - OSU_OFFSET_MS
     if o.profile is None or o.times[-1] - o.times[0] < TRACK_MIN_MS:
-        return steady
+        return first_on_downbeat(steady, anchor, ch, o)
     main_L = main_beat_length(o, steady)
     tracked = track_beats(o, fine_sections(o, main_L), probs=beat_prob(o, main_L))
-    return combine(o, steady, tracked)
+    return first_on_downbeat(combine(o, steady, tracked, anchor), anchor, ch, o)
+
+
+def first_on_downbeat(segs: list[Segment], anchor: float | None, ch, o: Onsets) -> list[Segment]:
+    """Move the first red line to its section's first downbeat at or after 0 ms (same grid)."""
+    if not segs:
+        return segs
+    from .downbeat import downbeat_phase
+    from .grid import beats as grid_beats
+
+    segs = sorted(segs, key=lambda s: s.time)
+    s0 = segs[0]
+    end = segs[1].time if len(segs) > 1 else None
+    bar = s0.meter * s0.beat_length
+    on_grid = lambda x: abs((x - s0.time + s0.beat_length / 2) % s0.beat_length - s0.beat_length / 2) < 10
+    a = None if anchor is None else anchor + OSU_OFFSET_MS
+    if a is not None and on_grid(a) and (end is None or a < end + bar):
+        first = a  # the song's anchor downbeat lies on the first section's grid
+    elif ch is not None and end is not None:
+        b = grid_beats([s0], s0.time, end)
+        if len(b) < 12:
+            return segs
+        bp = b - OSU_OFFSET_MS  # the audio's own clock, like onsets and chroma
+        first = b[downbeat_phase(o, ch, bp[0], s0.beat_length, bp[0], bp[-1])]
+    else:
+        return segs
+    first -= np.floor(first / bar) * bar  # earliest downbeat >= 0 on this grid
+    if end is not None and first >= end:
+        return segs
+    return [Segment(float(first), s0.beat_length, s0.meter)] + segs[1:]
 
 
 def detect(path, fine: bool | None = None, steady_only: bool = False) -> list[Segment]:
@@ -596,7 +657,7 @@ def detect(path, fine: bool | None = None, steady_only: bool = False) -> list[Se
     o = onsets(pcm, sr)
     if fine:
         o = sharpen(o, onsets(pcm, sr, FINE_N_FFT, FINE_HOP_MS))
-    return detect_onsets(o) if steady_only else detect_full(o)
+    return detect_onsets(o) if steady_only else detect_full(o, pcm, sr)
 
 
 # Second opinion on the half-beat phase: logistic model over spectral placement,
@@ -694,11 +755,11 @@ class Timing:
     alt_segments: list[Segment] | None = None  # the same timing shifted by half a beat
 
 
-def analyze(path) -> Timing:
+def analyze(path, downbeat_ms: float | None = None) -> Timing:
     """Full analysis for users: red lines plus an honest flag when the beat phase is in doubt."""
     pcm, sr = decode_bass(path)
     o = onsets(pcm, sr)
-    segs = detect_full(o)
+    segs = detect_full(o, pcm, sr, downbeat_ms)
     starts = [s.time - OSU_OFFSET_MS for s in segs]  # back to the audio's own clock, like onset times
     ends = starts[1:] + [o.times[-1] + 1]
     main = max(range(len(segs)), key=lambda i: ends[i] - starts[i])

@@ -174,7 +174,7 @@ SHORT_LINE_BEATS = 2  # a red line spanning fewer beats than this is "short"
 SHORT_LINE_COST = float(_env("SHORT_LINE_COST", "3"))  # x line_cost extra for a short line
 
 
-def segment(beats: Beats, line_cost=60.0, sigma_ms=2.5, max_len=4096) -> list[Segment]:
+def segment(beats: Beats, line_cost=60.0, sigma_ms=2.5, max_len=4096, allowed=None) -> list[Segment]:
     """Fewest red lines that keep the grid on the beats (optimal partition by DP).
 
     Cost of a section = squared residuals of its supported beats around a
@@ -182,6 +182,7 @@ def segment(beats: Beats, line_cost=60.0, sigma_ms=2.5, max_len=4096) -> list[Se
     Sections share their boundary beat, as a new red line starts on a beat.
     A short section pays SHORT_LINE_COST x line_cost more: in rubato it can
     still win, a one-beat blip inside a smooth tempo ramp does not.
+    allowed: bool per beat, where a new red line may start (mappers: downbeats only).
     """
     x = np.arange(len(beats.times), dtype=float)
     y = beats.times
@@ -204,6 +205,8 @@ def segment(beats: Beats, line_cost=60.0, sigma_ms=2.5, max_len=4096) -> list[Se
     best[0] = 0.0
     for j in range(1, n):
         i = np.arange(max(0, j - max_len), j)
+        if allowed is not None and j < n - 1 and not allowed[j]:
+            continue  # no red line can start on this beat, so no section may end on it
         cost = best[i] + sse(i, j) / sigma_ms ** 2 + line_cost * (1 + SHORT_LINE_COST * (j - i < SHORT_LINE_BEATS))
         k = int(np.argmin(cost))
         best[j], prev[j] = cost[k], i[k]
@@ -273,9 +276,9 @@ def polish(o, seg: Segment, lo: float, hi: float, subdiv=4) -> Segment:
     return Segment(float(phi), float(L))
 
 
-def lines(o, beats: Beats, line_cost=60.0, sigma_ms=2.5, polish_beats=16) -> list[Segment]:
+def lines(o, beats: Beats, line_cost=60.0, sigma_ms=2.5, polish_beats=16, allowed=None) -> list[Segment]:
     """Red lines from tracked beats: optimal segmentation, then onset-level polish of long sections."""
-    segs = segment(beats, line_cost, sigma_ms)
+    segs = segment(beats, line_cost, sigma_ms, allowed=allowed)
     out = []
     for k, s in enumerate(segs):
         end = segs[k + 1].time if k + 1 < len(segs) else beats.times[-1] + s.beat_length
