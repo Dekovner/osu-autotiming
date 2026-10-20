@@ -31,6 +31,19 @@ class OsuFile:
     last_object: float | None = None
 
 
+SAMPLE_SETS = {"default": 0, "normal": 1, "soft": 2, "drum": 3}
+
+
+def timing_lines(segments, sample_set: str = "normal", volume: int = 100) -> list[str]:
+    """[TimingPoints] red lines: time,beatLength,meter,sampleSet,sampleIndex,volume,uninherited,effects.
+
+    Only the timing is ours; hitsound fields get a mapper's usual defaults
+    (Normal, index 0, 100%) unless asked otherwise.
+    """
+    return [f"{round(s.time)},{s.beat_length:.12g},{s.meter},{SAMPLE_SETS[sample_set]},0,{volume},1,0"
+            for s in sorted(segments, key=lambda s: s.time)]
+
+
 def read_osu(path) -> OsuFile:
     path = Path(path)
     osu = OsuFile(path)
