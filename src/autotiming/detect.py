@@ -25,8 +25,7 @@ ONSET_BIAS_MS = 0.0  # calibrated on synthetic audio (see bench)
 # for mp3 and ogg alike (bench/beat_profile.py, bench/bias.py). That's osu!'s
 # clock convention, so it's applied to the output, not to onset detection.
 OSU_OFFSET_MS = -20.4
-# mappers' default tempo octave: ranked BPM median is 170; picking the x0.5/x1/x2
-# closest to this matches ranked 86% of the time vs 57% for raw strongest tempo
+# centre of the tempo prior in the octave model (ranked BPM median is 170)
 OCTAVE_CENTER_BPM = 175.0
 
 
@@ -39,6 +38,7 @@ class Onsets:
     env_low: np.ndarray
     sub: np.ndarray  # share below ~90 Hz: kick fundamentals, the most reliable beat cue
     hop_ms: float  # exact frame step (HOP_MS rounded to whole samples)
+    profile: np.ndarray | None = None  # per-onset flux in each of the N_BANDS bands (what kind of hit it is)
 
 
 def _bands(sr: int, n_fft: int) -> np.ndarray:
@@ -86,7 +86,7 @@ def onsets(pcm: np.ndarray, sr: int, n_fft: int = N_FFT, hop_target_ms: float = 
     strength = env[k] - thresh[k]
     low = env_low[k] / (env[k] + 1e-9)
     sub = env_sub[k] / (env[k] + 1e-9)
-    return Onsets(times, strength, low, env, env_low, sub, hop_ms)
+    return Onsets(times, strength, low, env, env_low, sub, hop_ms, diff[k])
 
 
 def tempo_candidates(env: np.ndarray, hop_ms: float, n: int = 6, lo_bpm=60, hi_bpm=400) -> list[float]:
@@ -107,13 +107,31 @@ def tempo_candidates(env: np.ndarray, hop_ms: float, n: int = 6, lo_bpm=60, hi_b
 HARMONICS = ((1, 1.0), (2, 0.5), (4, 0.25))  # beat, 1/2, 1/4 lines
 
 
-def _phase(times, weights, L, sigma=8.0):
-    """Beat phase maximizing kernel-weighted onset mass on the beats."""
-    phis = np.arange(0, L, 0.5)
-    d = (times[None, :] - phis[:, None]) % L
-    d = np.minimum(d, L - d)
-    score = (weights[None, :] * np.exp(-0.5 * (d / sigma) ** 2)).sum(axis=1)
-    return float(phis[np.argmax(score)])
+def _phase(times, weights, L, sigma=8.0, res=0.5):
+    """Beat phase maximizing kernel-weighted onset mass on the beats.
+
+    Onset phases go into a res-ms histogram, which is circularly convolved with
+    the Gaussian kernel by FFT: O(n + bins log bins) instead of n x bins.
+    """
+    nb = max(1, int(np.ceil(L / res)))
+    hist = np.bincount((np.floor((times % L) / res).astype(int)) % nb, weights=weights, minlength=nb)
+    k = np.arange(nb)
+    d = np.minimum(k, nb - k) * res
+    score = np.fft.irfft(np.fft.rfft(hist) * np.fft.rfft(np.exp(-0.5 * (d / sigma) ** 2)), nb)
+    return float((np.argmax(score) + 0.5) * res)
+
+
+def coherence(times, weights, Ls) -> np.ndarray:
+    """Sum over HARMONICS of the weighted resultant length of onset phases, per beat length.
+
+    One complex exponential per (onset, L); the 1/2 and 1/4 harmonics are its
+    square and fourth power, which is far cheaper than three exp calls.
+    """
+    z = np.exp(2j * np.pi * times[:, None] / Ls[None, :])
+    w = weights[:, None]
+    z2 = z * z
+    return (np.abs((w * z).sum(axis=0)) + 0.5 * np.abs((w * z2).sum(axis=0))
+            + 0.25 * np.abs((w * (z2 * z2)).sum(axis=0)))
 
 
 def refine_period(times, weights, L0, span=0.015):
@@ -131,8 +149,7 @@ def refine_period(times, weights, L0, span=0.015):
     best_L, best_c = L0, -1.0
     for s in range(0, len(Ls), 256):
         chunk = Ls[s:s + 256]
-        ph = 2j * np.pi * times[:, None] / chunk[None, :]
-        c = sum(a * np.abs((weights[:, None] * np.exp(h * ph)).sum(axis=0)) for h, a in HARMONICS)
+        c = coherence(times, weights, chunk)
         i = int(np.argmax(c))
         if c[i] > best_c:
             best_L, best_c = float(chunk[i]), float(c[i])
@@ -208,9 +225,7 @@ def local_tempo_path(t, w, L_lo=60000 / 400, L_hi=60000 / 60):
         if sel.sum() < 6:
             continue
         tt, ww = t[sel], w[sel]
-        ph = 2j * np.pi * tt[:, None] / Ls[None, :]
-        coh = sum(a * np.abs((ww[:, None] * np.exp(h * ph)).sum(axis=0)) for h, a in HARMONICS)
-        E[i] = coh / (ww.sum() * sum(a for _, a in HARMONICS))
+        E[i] = coherence(tt, ww, Ls) / (ww.sum() * sum(a for _, a in HARMONICS))
     # Viterbi: moving to a neighbouring L (drift) is free, anything else costs JUMP_COST
     score = E[0].copy()
     back = np.zeros(E.shape, int)
@@ -336,6 +351,15 @@ def prune_segments(t, w, wl, segs: list[Segment], global_seg: Segment) -> list[S
     """
     if len(segs) > 1 and piecewise_excess(t, w, [global_seg]) >= piecewise_excess(t, w, segs) - PRUNE_SLACK:
         return [global_seg]
+    memo = {}  # a merge of an unchanged neighbour pair is refit once, not on every pass
+
+    def merged_fit(lo, hi, L):
+        key = (round(lo, 3), round(hi, 3), round(L, 6))
+        if key not in memo:
+            sel = (t >= lo) & (t < hi)
+            memo[key] = fit_grid(t[sel], w[sel], L, span=0.003, w_low=wl[sel])
+        return memo[key]
+
     while len(segs) > 1:
         base = piecewise_excess(t, w, segs)
         best = None
@@ -346,7 +370,7 @@ def prune_segments(t, w, wl, segs: list[Segment], global_seg: Segment) -> list[S
             if sel.sum() < 8:
                 cand_segs = segs[:i + 1] + segs[i + 2:]
             else:
-                fits = [fit_grid(t[sel], w[sel], s.beat_length, span=0.006, w_low=wl[sel]) for s in segs[i:i + 2]]
+                fits = [merged_fit(lo, hi, s.beat_length) for s in segs[i:i + 2]]
                 p, l, _ = max(fits, key=lambda f: f[2])
                 start = p if i == 0 else p + np.ceil((segs[i].time - p) / l - 0.5) * l
                 cand_segs = segs[:i] + [Segment(start, l)] + segs[i + 2:]
@@ -359,11 +383,80 @@ def prune_segments(t, w, wl, segs: list[Segment], global_seg: Segment) -> list[S
     return segs
 
 
+OCTAVE_EDGES = np.geomspace(30, 16000, N_BANDS + 1)
+OCTAVE_GROUPS = {"sub": (0, 90), "low": (90, 250), "mid": (250, 2500), "high": (2500, 16000)}
+# Logistic scores for "this candidate tempo is the one mappers pick", fitted on
+# 733 ranked maps by bench/octave_exp.py (grouped 5-fold CV: 85.5% vs 81.6% for
+# nearest-to-175-BPM). Only differences between candidates matter, so no intercept.
+OCTAVE_COEF = {
+    "density": -0.105367,
+    "high_beat": -1.659233,
+    "high_half": 10.106496,
+    "high_odd": 1.782723,
+    "high_quarter": -10.981509,
+    "log2_rel": -0.328215,
+    "low_beat": -0.625796,
+    "low_half": 5.125806,
+    "low_odd": -2.200679,
+    "low_quarter": 2.720595,
+    "mid_beat": -1.254305,
+    "mid_half": -6.617605,
+    "mid_odd": 6.763075,
+    "mid_quarter": 7.192880,
+    "sub_beat": -3.033623,
+    "sub_half": -1.239800,
+    "sub_odd": 0.520464,
+    "sub_quarter": -3.064269,
+    "log2_rel_sq": -2.354271,
+}
+
+
+def octave_features(o: Onsets, phi: float, L: float, lo: float, hi: float) -> dict:
+    """Where each band group's onset mass lands on the grid (phi, L): beats, halves, quarters, odd beats."""
+    sel = (o.times >= lo) & (o.times < hi)
+    t, prof = o.times[sel], o.profile[sel]
+    pos = ((t - phi) / L) % 1.0
+    beat_idx = np.floor((t - phi) / L + 0.5).astype(int)
+    tol = min(0.08, 12 / L)
+    near = lambda p: np.abs((pos - p + 0.5) % 1.0 - 0.5) < tol
+    on_b, on_h, on_q = near(0), near(0.5), near(0.25) | near(0.75)
+    odd = (beat_idx % 2) == 1
+    f = {"log2_rel": np.log2(60000 / L / OCTAVE_CENTER_BPM)}
+    f["log2_rel_sq"] = f["log2_rel"] ** 2
+    eps = 1e-6
+    for g, (a, b) in OCTAVE_GROUPS.items():
+        m = prof[:, (OCTAVE_EDGES[:-1] >= a) & (OCTAVE_EDGES[:-1] < b)].sum(axis=1)
+        tot = m.sum() + eps
+        f[f"{g}_beat"] = m[on_b].sum() / tot
+        f[f"{g}_half"] = m[on_h].sum() / tot
+        f[f"{g}_quarter"] = m[on_q].sum() / tot
+        f[f"{g}_odd"] = m[on_b & odd].sum() / (m[on_b].sum() + eps)  # backbeat: snare on every other beat
+    f["density"] = sel.sum() / max(1.0, (hi - lo) / L)
+    return f
+
+
+def octave_candidates(o: Onsets, phi: float, L: float, lo: float, hi: float) -> dict:
+    """The main red line at x0.5 / x1 / x2 tempo: factor -> (phase, beat length)."""
+    wl, w = o.strength * (o.sub + 0.5 * o.low), weights(o)
+    sel = (o.times >= lo) & (o.times < hi)
+    half_phi = beat_phase(o.times[sel], wl[sel], w[sel], phi, 2 * L, subdiv=2) if sel.any() else phi
+    return {1.0: (phi, L), 2.0: (phi, L / 2), 0.5: (half_phi, 2 * L)}
+
+
+def octave_score(f: dict) -> float:
+    return sum(c * f[k] for k, c in OCTAVE_COEF.items())
+
+
 def choose_octave(o: Onsets, segs: list[Segment]) -> list[Segment]:
-    """Rescale every red line by the same x0.5/x1/x2 so the main tempo looks like a mapper's pick."""
-    main = max(range(len(segs)), key=lambda i: (segs[i + 1].time if i + 1 < len(segs) else o.times[-1]) - segs[i].time)
-    bpm = segs[main].bpm
-    f = min((0.5, 1.0, 2.0), key=lambda k: abs(np.log(bpm * k / OCTAVE_CENTER_BPM)))
+    """Rescale every red line by the same x0.5/x1/x2 so the main tempo is what a mapper would pick."""
+    ends = [segs[i + 1].time if i + 1 < len(segs) else o.times[-1] + 1 for i in range(len(segs))]
+    main = max(range(len(segs)), key=lambda i: ends[i] - segs[i].time)
+    lo = segs[main].time if main > 0 else o.times[0]
+    cands = octave_candidates(o, segs[main].time, segs[main].beat_length, lo, ends[main])
+    if o.profile is None:  # no band profile: fall back to the plain tempo prior
+        f = min(cands, key=lambda k: abs(np.log(segs[main].bpm * k / OCTAVE_CENTER_BPM)))
+    else:
+        f = max(cands, key=lambda k: octave_score(octave_features(o, *cands[k], lo, ends[main])))
     if f == 1.0:
         return segs
     if f == 2.0:
@@ -372,8 +465,7 @@ def choose_octave(o: Onsets, segs: list[Segment]) -> list[Segment]:
     wl, w = o.strength * (o.sub + 0.5 * o.low), weights(o)
     out = []
     for i, s in enumerate(segs):
-        end = segs[i + 1].time if i + 1 < len(segs) else o.times[-1] + 1
-        sel = (o.times >= s.time - 2 * s.beat_length) & (o.times < end)
+        sel = (o.times >= s.time - 2 * s.beat_length) & (o.times < ends[i])
         L = 2 * s.beat_length
         phi = beat_phase(o.times[sel], wl[sel], w[sel], s.time, L, subdiv=2) if sel.any() else s.time
         out.append(Segment(phi if i == 0 else s.time + ((phi - s.time) % L), L, s.meter))
@@ -400,7 +492,7 @@ def sharpen(o: Onsets, fine: Onsets) -> Onsets:
     near = np.where(np.abs(fine.times[j - 1] - o.times) < np.abs(fine.times[j] - o.times), j - 1, j)
     d = fine.times[near] - o.times
     times = np.where(np.abs(d) < FINE_MATCH_MS, fine.times[near], o.times)
-    return Onsets(times, o.strength, o.low, o.env, o.env_low, o.sub, o.hop_ms)
+    return Onsets(times, o.strength, o.low, o.env, o.env_low, o.sub, o.hop_ms, o.profile)
 
 
 def detect(path, fine: bool | None = None) -> list[Segment]:
