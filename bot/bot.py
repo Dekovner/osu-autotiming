@@ -76,14 +76,14 @@ def build_reply(name: str, res: dict, downbeat_ms: float | None) -> tuple[str, l
         notes.append("Red lines sit on downbeats I guessed; if they land mid-bar, run again with `downbeat:` set to a downbeat in ms.")
     if res["phase_uncertain"]:
         notes.append("Beat phase is uncertain here: if the grid feels on the offbeat, try the alternative (+1/2 beat) in the file.")
-    text = "[TimingPoints]\n" + "\n".join(res["lines"]) + "\n"
+    text = "\n".join(res["lines"]) + "\n"  # bare lines: a [TimingPoints] header breaks pasting
     files = []
     if res["alt_lines"]:
-        text_alt = "[TimingPoints]\n" + "\n".join(res["alt_lines"]) + "\n"
+        text_alt = "\n".join(res["alt_lines"]) + "\n"
         files.append(discord.File(io.BytesIO(text_alt.encode()), filename="timing_alt_half_beat.txt"))
     body = head
     if len(res["lines"]) <= INLINE_LINES:
-        body += f"\n```ini\n{text}```"
+        body += f"\n```\n{text}```"
     else:
         body += "\nTiming is long, see the file."
         files.insert(0, discord.File(io.BytesIO(text.encode()), filename="timing.txt"))
