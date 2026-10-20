@@ -20,6 +20,7 @@ let past = [], future = [];
 let view = { start: 0, span: 8000 };
 let playing = false, playCtx0 = 0, playPos0 = 0, source = null, rate = 1, cursor = 0;
 let metroNext = 0, phaseUncertain = false, fileName = "";
+let hoverT = null, hoverE = null;  // pointer position on the waveform (osu ms), for the readout
 
 // ---------- time & grid helpers ----------
 
@@ -190,6 +191,21 @@ function renderSel() {
   }
 }
 
+// readout of the pointer: time, place in the bar, and where a click would snap
+function renderHover() {
+  const el = $("hover");
+  if (hoverT === null || !lines.length) { el.innerHTML = ""; return; }
+  const t = drag && drag.kind === "line" && drag.moved ? drag.line.time : hoverT;
+  const l = lines[lineAt(t)], d = div();
+  const beats = (t - l.time) / l.beat_length;
+  const bar = Math.floor(beats / l.meter), beat = Math.floor(beats - bar * l.meter);
+  const sub = Math.round((beats - Math.floor(beats)) * d) % d;
+  const where = t < lines[0].time ? "before the first red line" : `bar ${bar + 1} · beat ${beat + 1}${sub ? ` · +${sub}/${d}` : ""}`;
+  const s = snap(t, hoverE);
+  const snapped = Math.abs(s - t) > 0.5 && !(drag && drag.kind === "line") ? ` · <i>snap → ${Math.round(s)}</i>` : "";
+  el.innerHTML = `<b>${fmtClock(t)}</b> ${Math.round(t)} ms · ${where}${snapped}`;
+}
+
 function select(i) { sel = i; renderList(); renderSel(); draw(); }
 
 function reveal(t) {
@@ -281,6 +297,13 @@ function draw() {
       g.beginPath(); g.moveTo(xl, 0); g.lineTo(xl, h); g.stroke(); g.setLineDash([]);
     }
   });
+  // pointer
+  if (hoverT !== null) {
+    const xh = Math.round(xOf(hoverT, w)) + 0.5;
+    g.strokeStyle = "#4598e0"; g.globalAlpha = 0.6; g.lineWidth = 1;
+    g.beginPath(); g.moveTo(xh, 0); g.lineTo(xh, h); g.stroke();
+    g.globalAlpha = 1;
+  }
   // playhead
   const xp = Math.round(xOf(now(), w)) + 0.5;
   g.strokeStyle = "#ecebf1"; g.lineWidth = 1;
@@ -569,6 +592,10 @@ wave.addEventListener("pointerdown", (e) => {
 });
 wave.addEventListener("pointermove", (e) => {
   const w = wave.clientWidth;
+  hoverT = tOf(e.offsetX, w);
+  hoverE = e;
+  renderHover();
+  if (!drag) draw();
   if (!drag) {
     wave.style.cursor = lines.some((l) => Math.abs(xOf(l.time, w) - e.offsetX) < LINE_HIT_PX) ? "ew-resize" : "crosshair";
     return;
@@ -595,6 +622,7 @@ wave.addEventListener("pointerup", (e) => {
   if (drag && drag.kind === "line" && drag.moved) refresh();
   drag = null;
 });
+wave.addEventListener("pointerleave", () => { if (!drag) { hoverT = null; renderHover(); draw(); } });
 wave.addEventListener("dblclick", (e) => addLineAt(tOf(e.offsetX, wave.clientWidth), e));
 
 const ov = $("overview");
