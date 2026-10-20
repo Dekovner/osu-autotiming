@@ -503,3 +503,112 @@ def detect(path, fine: bool | None = None) -> list[Segment]:
     if fine:
         o = sharpen(o, onsets(pcm, sr, FINE_N_FFT, FINE_HOP_MS))
     return detect_onsets(o)
+
+
+# Second opinion on the half-beat phase: logistic model over spectral placement,
+# broadband hits and loudness on the beat vs the "and", fitted on 725 ranked maps
+# (bench/phase_exp.py, bench/loud_exp.py). It is not more accurate than the kick
+# rule on its own (94% vs 93% CV, a tie on the user's nominated maps), but where
+# the two disagree the phase really is in doubt: flagging those 8% of maps
+# catches 2/3 of phase errors, leaving 2.5% silent ones instead of 7%.
+PHASE_COEF_SPECTRAL = {
+    "bb_beat": 0.847612,
+    "bb_half": -0.847612,
+    "high_beat": 1.745920,
+    "high_half": -1.745920,
+    "high_odd": -0.042046,
+    "low_beat": 0.916184,
+    "low_half": -0.916184,
+    "low_odd": -0.503244,
+    "mid_beat": 1.087576,
+    "mid_half": -1.087576,
+    "mid_odd": -0.285190,
+    "sub_beat": 0.633981,
+    "sub_half": -0.633981,
+    "sub_odd": -0.501005,
+}
+PHASE_COEF_LOUD = {
+    "loud_all": 0.494976,
+    "loud_hi": 0.443093,
+    "loud_lo": 0.063156,
+}
+
+
+def broadband_features(o: Onsets, phi: float, L: float, lo: float, hi: float) -> dict:
+    """Kick/snare hits are broadband; offbeat bass is low-only and hats are high-only."""
+    sel = (o.times >= lo) & (o.times < hi)
+    t, prof = o.times[sel], o.profile[sel]
+    g = np.stack([prof[:, (OCTAVE_EDGES[:-1] >= a) & (OCTAVE_EDGES[:-1] < b)].sum(axis=1) for a, b in OCTAVE_GROUPS.values()], 1)
+    share = g / (g.sum(1, keepdims=True) + 1e-9)
+    bb = np.minimum(share[:, 0] + share[:, 1], share[:, 2] + share[:, 3]) * 2 * g.sum(1)
+    pos = ((t - phi) / L) % 1.0
+    tol = min(0.08, 12 / L)
+    near = lambda q: np.abs((pos - q + 0.5) % 1.0 - 0.5) < tol
+    tot = bb.sum() + 1e-9
+    return {"bb_beat": bb[near(0)].sum() / tot, "bb_half": bb[near(0.5)].sum() / tot,
+            "bb_quarter": bb[near(0.25) | near(0.75)].sum() / tot}
+
+
+def _power_env(x, sr):
+    e = x.astype(np.float64) ** 2
+    k = max(1, int(sr * 0.005))  # 5 ms boxcar
+    c = np.cumsum(np.concatenate([[0], e]))
+    return (c[k:] - c[:-k]) / k
+
+
+def loudness_on_beat(pcm, sr, phi: float, L: float, lo: float, hi: float) -> dict:
+    """How many dB louder the 40 ms after each beat are than after each "and" (all / <150 Hz / >2 kHz)."""
+    from scipy.signal import butter, sosfilt
+
+    beats = phi + np.arange(np.ceil((lo - phi) / L), np.floor((hi - phi) / L)) * L
+
+    def folded(env, times):
+        idx = (times[:, None] + np.arange(0, 40)[None, :]) * sr / 1000
+        idx = idx[(idx[:, 0] > 0) & (idx[:, -1] < len(env))].astype(int)
+        return float(10 * np.log10(env[idx].max(axis=1).mean() + 1e-12)) if len(idx) else 0.0
+
+    out = {}
+    for name, sig in (("all", pcm),
+                      ("lo", sosfilt(butter(4, 150, "lowpass", fs=sr, output="sos"), pcm)),
+                      ("hi", sosfilt(butter(4, 2000, "highpass", fs=sr, output="sos"), pcm))):
+        env = _power_env(sig, sr)
+        out[f"loud_{name}"] = folded(env, beats) - folded(env, beats + L / 2)
+    return out
+
+
+def phase_opinions(o: Onsets, pcm, sr, phi: float, L: float, lo: float, hi: float) -> tuple[bool, bool]:
+    """(kick rule keeps phi, model keeps phi) against the grid shifted by half a beat."""
+    sel = (o.times >= lo) & (o.times < hi)
+    t, wl, w = o.times[sel], (o.strength * (o.sub + 0.5 * o.low))[sel], weights(o)[sel]
+
+    def kick(p):
+        d = np.abs((t - p + L / 2) % L - L / 2)
+        hit = np.exp(-0.5 * (d / 6) ** 2)
+        return (wl * hit).sum() + 0.3 * (w * hit).sum()
+
+    a = octave_features(o, phi, L, lo, hi) | broadband_features(o, phi, L, lo, hi)
+    b = octave_features(o, phi + L / 2, L, lo, hi) | broadband_features(o, phi + L / 2, L, lo, hi)
+    loud = loudness_on_beat(pcm, sr, phi, L, lo, hi)
+    score = sum(c * (a[k] - b[k]) for k, c in PHASE_COEF_SPECTRAL.items()) + sum(c * loud[k] for k, c in PHASE_COEF_LOUD.items())
+    return kick(phi) >= kick(phi + L / 2), score > 0
+
+
+@dataclass
+class Timing:
+    segments: list[Segment]  # red lines in osu! time
+    phase_uncertain: bool = False  # kick rule and phase model disagree: check the "and" too
+    alt_segments: list[Segment] | None = None  # the same timing shifted by half a beat
+
+
+def analyze(path) -> Timing:
+    """Full analysis for users: red lines plus an honest flag when the beat phase is in doubt."""
+    pcm, sr = decode_bass(path)
+    o = onsets(pcm, sr)
+    segs = detect_onsets(o)
+    starts = [s.time - OSU_OFFSET_MS for s in segs]  # back to the audio's own clock, like onset times
+    ends = starts[1:] + [o.times[-1] + 1]
+    main = max(range(len(segs)), key=lambda i: ends[i] - starts[i])
+    lo = starts[main] if main > 0 else o.times[0]
+    rule_keeps, model_keeps = phase_opinions(o, pcm, sr, starts[main], segs[main].beat_length, lo, ends[main])
+    alt = [Segment(s.time + s.beat_length / 2, s.beat_length, s.meter) for s in segs]
+    return Timing(segs, phase_uncertain=rule_keeps != model_keeps, alt_segments=alt)
