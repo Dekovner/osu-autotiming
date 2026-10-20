@@ -8,7 +8,7 @@ const API = "api/analyze";
 const SNAP_COLORS = { 1: "#ecebf1", 2: "#f04b3c", 3: "#b07ad8", 4: "#4598e0", 6: "#d79be8", 8: "#e8c547" };
 const LINE_HIT_PX = 7;
 
-let actx = null, buffer = null;
+let actx = null, buffer = null, musicGain = null, clickGain = null;
 let duration = 0, decodeShift = 0;
 let mip = [];                      // [{step, min, max}] waveform levels, 1 ms .. 1 s per bin
 let lines = [], sel = -1;          // red lines {time, beat_length, meter}, sorted by time
@@ -284,13 +284,29 @@ function drawOverview() {
 
 // ---------- playback & metronome ----------
 
+function audioGraph() {
+  if (musicGain) return;
+  musicGain = actx.createGain();
+  clickGain = actx.createGain();
+  musicGain.connect(actx.destination);
+  clickGain.connect(actx.destination);
+  applyVolumes();
+}
+// sliders: music 0-100%, click 0-200% (the click can be pushed above a loud master)
+function applyVolumes() {
+  const m = +$("vol-music").value / 100, c = +$("vol-click").value / 100;
+  if (musicGain) { musicGain.gain.value = m * m; clickGain.gain.value = c * c; }  // squared: closer to how loud it sounds
+  try { localStorage.setItem("timing-vol", JSON.stringify([$("vol-music").value, $("vol-click").value])); } catch (e) { /* private mode */ }
+}
+
 function play() {
   if (!buffer) return;
   actx.resume();
+  audioGraph();
   source = actx.createBufferSource();
   source.buffer = buffer;
   source.playbackRate.value = rate;
-  source.connect(actx.destination);
+  source.connect(musicGain);
   const off = (cursor + decodeShift) / 1000;
   playCtx0 = actx.currentTime + 0.03;
   if (off >= 0) source.start(playCtx0, off);
@@ -325,15 +341,27 @@ function loop() {
   requestAnimationFrame(loop);
 }
 
+let noise = null;
 function click(when, accent) {
+  if (!noise) {  // 20 ms of white noise for the attack: cuts through a dense mix better than a pure tone
+    noise = actx.createBuffer(1, Math.round(actx.sampleRate * 0.02), actx.sampleRate);
+    const d = noise.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / d.length);
+  }
   const o = actx.createOscillator(), gn = actx.createGain();
-  o.frequency.value = accent ? 1760 : 1180;
+  o.type = "square";
+  o.frequency.value = accent ? 2000 : 1400;
   gn.gain.setValueAtTime(0.0001, when);
-  gn.gain.exponentialRampToValueAtTime(accent ? 0.5 : 0.3, when + 0.002);
-  gn.gain.exponentialRampToValueAtTime(0.0001, when + 0.05);
-  o.connect(gn).connect(actx.destination);
+  gn.gain.exponentialRampToValueAtTime(accent ? 0.9 : 0.6, when + 0.001);
+  gn.gain.exponentialRampToValueAtTime(0.0001, when + 0.045);
+  o.connect(gn).connect(clickGain);
   o.start(when);
-  o.stop(when + 0.06);
+  o.stop(when + 0.05);
+  const n = actx.createBufferSource(), ng = actx.createGain();
+  n.buffer = noise;
+  ng.gain.value = accent ? 0.7 : 0.45;
+  n.connect(ng).connect(clickGain);
+  n.start(when);
 }
 function scheduleMetronome() {
   if (!$("metro").checked) { metroNext = now(); return; }
@@ -443,6 +471,12 @@ $("play").onclick = () => (playing ? pause() : play());
 $("rate").onchange = (e) => { rate = +e.target.value; if (playing) { pause(); play(); } };
 $("div").onchange = draw;
 $("metro").onchange = () => { metroNext = now(); };
+try {
+  const v = JSON.parse(localStorage.getItem("timing-vol") || "null");
+  if (v) { $("vol-music").value = v[0]; $("vol-click").value = v[1]; }
+} catch (e) { /* nothing saved */ }
+$("vol-music").oninput = applyVolumes;
+$("vol-click").oninput = applyVolumes;
 $("add").onclick = () => addLineAt(now());
 $("del").onclick = deleteSel;
 $("undo").onclick = undo;
