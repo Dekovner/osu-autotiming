@@ -20,7 +20,7 @@ let past = [], future = [];
 let view = { start: 0, span: 8000 };
 let playing = false, playCtx0 = 0, playPos0 = 0, source = null, rate = 1, cursor = 0;
 let metroNext = 0, phaseUncertain = false, fileName = "";
-let hoverT = null, hoverE = null;  // pointer position on the waveform (osu ms), for the readout
+let hoverT = null;  // pointer position on the waveform (osu ms), for the readout
 
 // ---------- time & grid helpers ----------
 
@@ -62,13 +62,16 @@ function ticks(a, b, div, src = lines) {
 const gcd = (a, b) => (b ? gcd(b, a % b) : Math.abs(a));
 
 // magnet: t moves to the nearest grid tick (current divisor) if one is within MAGNET_PX on screen.
-// A dragged line snaps to the grid of the other lines, not its own (which moves with it).
-function snap(t, e, skip = null) {
+// A dragged line snaps to the grid of the other lines, not its own (which moves with it), and not
+// back to the tick it was picked up from: lines sit on the previous grid, so that tick would
+// swallow every nudge of a few ms.
+function snap(t, e, skip = null, from = null) {
   if (!$("magnet").checked || (e && e.altKey) || !lines.length) return t;
   const r = (MAGNET_PX / $("wave").clientWidth) * view.span;
   const src = skip ? lines.filter((l) => l !== skip) : lines;
   let best = t, bd = r;
   for (const tk of ticks(t - r, t + r, div(), src)) {
+    if (from !== null && Math.abs(tk.t - from) < 1) continue;
     if (Math.abs(tk.t - t) <= bd) { bd = Math.abs(tk.t - t); best = tk.t; }
   }
   return best;
@@ -191,7 +194,7 @@ function renderSel() {
   }
 }
 
-// readout of the pointer: time, place in the bar, and where a click would snap
+// readout of the pointer: time and place in the bar
 function renderHover() {
   const el = $("hover");
   if (hoverT === null || !lines.length) { el.innerHTML = ""; return; }
@@ -201,9 +204,7 @@ function renderHover() {
   const bar = Math.floor(beats / l.meter), beat = Math.floor(beats - bar * l.meter);
   const sub = Math.round((beats - Math.floor(beats)) * d) % d;
   const where = t < lines[0].time ? "before the first red line" : `bar ${bar + 1} · beat ${beat + 1}${sub ? ` · +${sub}/${d}` : ""}`;
-  const s = snap(t, hoverE);
-  const snapped = Math.abs(s - t) > 0.5 && !(drag && drag.kind === "line") ? ` · <i>snap → ${Math.round(s)}</i>` : "";
-  el.innerHTML = `<b>${fmtClock(t)}</b> ${Math.round(t)} ms · ${where}${snapped}`;
+  el.innerHTML = `<b>${fmtClock(t)}</b> ${Math.round(t)} ms · ${where}`;
 }
 
 function select(i) { sel = i; renderList(); renderSel(); draw(); }
@@ -585,7 +586,7 @@ wave.addEventListener("pointerdown", (e) => {
   if (hit >= 0) {
     select(hit);
     commit();
-    drag = { kind: "line", line: lines[hit], dx: e.offsetX - xOf(lines[hit].time, w), x0: e.offsetX, moved: false };
+    drag = { kind: "line", line: lines[hit], from: lines[hit].time, dx: e.offsetX - xOf(lines[hit].time, w), x0: e.offsetX, moved: false };
   } else {
     drag = { kind: "pan", x0: e.offsetX, start0: view.start, moved: false };
   }
@@ -593,7 +594,6 @@ wave.addEventListener("pointerdown", (e) => {
 wave.addEventListener("pointermove", (e) => {
   const w = wave.clientWidth;
   hoverT = tOf(e.offsetX, w);
-  hoverE = e;
   renderHover();
   if (!drag) draw();
   if (!drag) {
@@ -603,7 +603,7 @@ wave.addEventListener("pointermove", (e) => {
   if (drag.kind === "line") {
     if (Math.abs(e.offsetX - drag.x0) > 3) drag.moved = true;
     if (!drag.moved) return;
-    drag.line.time = Math.round(snap(tOf(e.offsetX - drag.dx, w), e, drag.line));
+    drag.line.time = Math.round(snap(tOf(e.offsetX - drag.dx, w), e, drag.line, drag.from));
     lines.sort((a, b) => a.time - b.time);
     sel = lines.indexOf(drag.line);
     $("text").value = timingText();
