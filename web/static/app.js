@@ -542,11 +542,12 @@ async function analyseOnServer(form, name) {
   let job = await asJson(await fetch(API, { method: "POST", body: form }));
   const id = job.job;
   while (!job.error && job.status !== "done") {
+    const kind = job.marathon ? "marathon" : "song";
     if (job.status === "queued") {
-      status(job.ahead > 0 ? `in the queue: ${job.ahead} song${job.ahead > 1 ? "s" : ""} ahead of yours`
-        : `you're next (${job.running} song${job.running === 1 ? "" : "s"} being analysed)`, false, true);
+      status(job.ahead > 0 ? `in the ${job.marathon ? "marathon " : ""}queue: ${job.ahead} ${kind}${job.ahead > 1 ? "s" : ""} ahead of yours`
+        : `you're next (${job.running} ${kind}${job.running === 1 ? "" : "s"} being analysed)`, false, true);
     } else {
-      status(`analysing ${name}… (a few seconds per minute of audio)`, false, true);
+      status(`analysing ${name}… (${job.marathon ? "a marathon: a few minutes" : "a few seconds per minute of audio"})`, false, true);
     }
     await new Promise((r) => setTimeout(r, 1000));
     job = await asJson(await fetch(`api/job/${id}`));
@@ -554,8 +555,8 @@ async function analyseOnServer(form, name) {
   return job;
 }
 
-const MAX_MB = 30;  // the server's limit (web/api.py MAX_BYTES); nginx turns away anything bigger
-const TOO_BIG = `file too big: the limit is ${MAX_MB} MB (about 15 minutes of audio); cut the song or export a smaller mp3`;
+const MAX_MB = 160;  // the server's limit (web/api.py MARATHON_BYTES); nginx turns away anything bigger
+const TOO_BIG = `file too big: the limit is ${MAX_MB} MB (an hour of audio); cut it or export a smaller mp3`;
 
 async function load(file) {
   if (!file) return;

@@ -11,7 +11,7 @@ Results are cached per (dataset, method) in data/results/; delete a file to reru
 import os
 
 # one BLAS/FFT thread per worker: otherwise every worker grabs all cores
-for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMBA_NUM_THREADS"):
     os.environ.setdefault(_v, "1")
 
 import argparse

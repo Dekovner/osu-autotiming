@@ -3,9 +3,9 @@
     python web/api.py            # listens on API_HOST:API_PORT (default 127.0.0.1:8431)
 
 POST /analyze  (multipart: file=<audio>, optional downbeat=<ms>)
-  -> {"job": id, "status": "queued", "ahead": n, "running": m}   (answered at once)
+  -> {"job": id, "status": "queued", "ahead": n, "running": m, "marathon": bool}   (answered at once)
 GET /job/<id>
-  -> {"status": "queued", "ahead", "running"} | {"status": "running"}
+  -> {"status": "queued", "ahead", "running", "marathon"} | {"status": "running", "marathon"}
    | {"status": "done", "lines": [{"time", "beat_length", "meter"}...], "phase_uncertain", "alt": [...],
       "duration_ms", "audio_lag_ms", "wave": {"ms_per_px": 1, "min": base64 int8, "max": base64 int8},
       "env": {"ms": 1, "data": base64 uint8}, "seconds"}
@@ -15,6 +15,16 @@ so the page can line its own (browser) decode up with osu! time. Songs wait
 in one queue (the page shows its place in it) and are analysed in API_WORKERS
 niced processes; per-IP limits (songs an hour, songs waiting at once) and a queue
 cap keep one visitor from filling it.
+
+Marathons (longer than MAX_MINUTES, up to MARATHON_MINUTES; files up to
+MARATHON_BYTES) wait in a queue of their own and run MARATHON_WORKERS at a time in
+their own processes on MARATHON_THREADS cores each, so songs never wait behind one
+and an hour of audio (~2 GB while analysed) can't run six times over; each visitor
+gets MARATHON_PER_IP_PER_DAY.
+Length, not size, makes a marathon (a 5 minute wav is 50 MB): every upload starts in
+the song queue, whose decode stops before decoding audio that is too long and hands
+it over. A file over MAX_BYTES from a visitor with no marathons left today is turned
+away while it uploads, rather than after 160 MB went through the tunnel.
 """
 
 import asyncio
@@ -39,16 +49,27 @@ WORKERS = int(os.environ.get("API_WORKERS", "2"))
 PER_IP_PER_HOUR = int(os.environ.get("PER_IP_PER_HOUR", "60"))
 MAX_QUEUE = int(os.environ.get("MAX_QUEUE", "30"))  # songs waiting; beyond this new uploads are turned away
 PER_IP_PENDING = int(os.environ.get("PER_IP_PENDING", "3"))  # one visitor's songs queued or running at once
+MARATHON_BYTES = int(os.environ.get("MARATHON_BYTES", str(160 * 1024 * 1024)))
+MARATHON_MINUTES = float(os.environ.get("MARATHON_MINUTES", "60"))
+MARATHON_WORKERS = int(os.environ.get("MARATHON_WORKERS", "1"))
+MARATHON_THREADS = int(os.environ.get("MARATHON_THREADS", "4"))  # cores each marathon's tempo search spreads over
+MARATHON_QUEUE = int(os.environ.get("MARATHON_QUEUE", "5"))
+MARATHON_PER_IP_PER_DAY = int(os.environ.get("MARATHON_PER_IP_PER_DAY", "3"))
 JOB_TTL = 600.0  # seconds a finished result is kept for the page to fetch
 AUDIO_EXT = {".mp3", ".ogg", ".wav"}
 
 
-def _worker_init():
+def _worker_init(threads: int = 1):
+    """Songs run API_WORKERS side by side on one thread each; a marathon gets several."""
+    import numba
+
     os.nice(10)
+    numba.set_num_threads(max(1, min(threads, numba.config.NUMBA_NUM_THREADS)))
 
 
-def analyse(path: str, downbeat_ms: float | None) -> dict:
-    """Runs in a worker process: plain data only."""
+def analyse(path: str, downbeat_ms: float | None, max_minutes: float, marathon_minutes: float | None = None) -> dict:
+    """Runs in a worker process: plain data only. Audio longer than max_minutes but within
+    marathon_minutes comes back as {"marathon": seconds}, before it is decoded."""
     import numpy as np
 
     from autotiming.decode import TooLongError, decode_bass
@@ -56,9 +77,11 @@ def analyse(path: str, downbeat_ms: float | None) -> dict:
 
     t0 = time.time()
     try:
-        pcm, sr = decode_bass(path, max_seconds=MAX_MINUTES * 60)
+        pcm, sr = decode_bass(path, max_seconds=max_minutes * 60)
     except TooLongError as e:
-        return {"error": f"that's {e.seconds / 60:.1f} minutes; the limit is {MAX_MINUTES:g}"}
+        if marathon_minutes is not None and e.seconds <= marathon_minutes * 60:
+            return {"marathon": e.seconds}
+        return {"error": f"that's {e.seconds / 60:.1f} minutes; the limit is {marathon_minutes or max_minutes:g}"}
     except Exception as e:
         log.info("undecodable upload: %s", e)
         return {"error": "couldn't read that file as audio"}
@@ -73,8 +96,9 @@ def analyse(path: str, downbeat_ms: float | None) -> dict:
     energy = np.add.reduceat(pcm[: idx[-1]].astype(np.float64) ** 2, idx[:-1]) if n else np.zeros(0)
     db = 10 * np.log10(energy / (energy.max() + 1e-12) + 1e-9)  # 0 dB = loudest ms
     env = base64.b64encode(np.clip((db + 80) * 255 / 80, 0, 255).astype(np.uint8).tobytes()).decode()
+    del energy, db
     try:
-        r = analyze(path, downbeat_ms)
+        r = analyze(path, downbeat_ms, decoded=(pcm, sr))
     except NoRhythmError:
         return {"error": "no rhythm found in that audio (silence or a drone?)"}
     seg = lambda ss: [{"time": s.time, "beat_length": s.beat_length, "meter": s.meter} for s in ss]
@@ -91,21 +115,28 @@ def analyse(path: str, downbeat_ms: float | None) -> dict:
 
 
 class Limiter:
-    def __init__(self, per_hour: int):
-        self.per_hour, self.hits = per_hour, defaultdict(deque)
+    def __init__(self, limit: int, window: float = 3600.0):
+        self.limit, self.window, self.hits = limit, window, defaultdict(deque)
+
+    def _recent(self, key: str) -> deque:
+        now, q = time.time(), self.hits[key]
+        while q and now - q[0] > self.window:
+            q.popleft()
+        return q
+
+    def left(self, key: str) -> int:
+        return self.limit - len(self._recent(key))
 
     def allow(self, key: str) -> bool:
-        now, q = time.time(), self.hits[key]
-        while q and now - q[0] > 3600:
-            q.popleft()
-        if len(q) >= self.per_hour:
+        q = self._recent(key)
+        if len(q) >= self.limit:
             return False
-        q.append(now)
+        q.append(time.time())
         return True
 
     def prune(self):
         now = time.time()
-        for k in [k for k, q in self.hits.items() if not q or now - q[-1] > 3600]:
+        for k in [k for k, q in self.hits.items() if not q or now - q[-1] > self.window]:
             del self.hits[k]
 
 
@@ -113,16 +144,38 @@ class Job:
     def __init__(self, tmp: tempfile.TemporaryDirectory, path: Path, downbeat: float | None, ip: str):
         self.id = secrets.token_urlsafe(12)
         self.tmp, self.path, self.downbeat, self.ip = tmp, path, downbeat, ip
-        self.status, self.result, self.done_at = "queued", None, None
+        self.status, self.result, self.done_at, self.marathon = "queued", None, None, False
 
 
-def refusal(app, ip: str) -> web.Response | None:
+def refusal(app, ip: str) -> tuple[int, str] | None:
     """Turn an upload away when the queue is full or this visitor already has songs in it."""
     if len(app["waiting"]) >= MAX_QUEUE:
-        return web.json_response({"error": "the queue is full right now, try again in a minute"}, status=503)
+        return 503, "the queue is full right now, try again in a minute"
     if sum(j.ip == ip and j.status != "done" for j in app["jobs"].values()) >= PER_IP_PENDING:
-        return web.json_response({"error": f"you already have {PER_IP_PENDING} songs in the queue, wait for them"}, status=429)
+        return 429, f"you already have {PER_IP_PENDING} songs in the queue, wait for them"
     return None
+
+
+def marathon_refusal(app, ip: str) -> tuple[int, str] | None:
+    """Turn a marathon away when their queue is full or this visitor has had today's."""
+    if len(app["mwaiting"]) >= MARATHON_QUEUE:
+        return 503, "too many marathons waiting right now, try again in a few minutes"
+    if app["mlimiter"].left(ip) <= 0:
+        return 429, f"marathons (over {MAX_MINUTES:g} min, or files over {MAX_BYTES >> 20} MB) are " \
+                    f"{MARATHON_PER_IP_PER_DAY} a day each and you've had yours: try tomorrow"
+    return None
+
+
+def refuse(r: tuple[int, str]) -> web.Response:
+    return web.json_response({"error": r[1]}, status=r[0])
+
+
+def enqueue(app, job: Job, marathon: bool):
+    job.status, job.marathon = "queued", marathon
+    if marathon:
+        app["mlimiter"].allow(job.ip)  # marathon_refusal() was asked first: there is one left
+    (app["mwaiting"] if marathon else app["waiting"]).append(job)
+    (app["mqueue"] if marathon else app["queue"]).put_nowait(job)
 
 
 async def handle_analyze(request: web.Request) -> web.Response:
@@ -130,11 +183,11 @@ async def handle_analyze(request: web.Request) -> web.Response:
     app = request.app
     ip = request.headers.get("X-Real-IP") or request.remote or "?"
     if (r := refusal(app, ip)) is not None:
-        return r
+        return refuse(r)
     if not app["limiter"].allow(ip):
         return web.json_response({"error": "too many songs from you this hour, try later"}, status=429)
     reader = await request.multipart()
-    downbeat, path = None, None
+    downbeat, path, big = None, None, False
     tmp = tempfile.TemporaryDirectory()
     try:
         async for part in reader:
@@ -158,9 +211,14 @@ async def handle_analyze(request: web.Request) -> web.Response:
                 with path.open("wb") as f:
                     while chunk := await part.read_chunk(1 << 16):
                         size += len(chunk)
-                        if size > MAX_BYTES:
+                        if size > MARATHON_BYTES:
                             tmp.cleanup()
-                            return web.json_response({"error": f"file too big (limit {MAX_BYTES >> 20} MB)"}, status=413)
+                            return web.json_response({"error": f"file too big (limit {MARATHON_BYTES >> 20} MB)"}, status=413)
+                        if size > MAX_BYTES and not big:  # most likely a marathon: may this visitor have one?
+                            big = True
+                            if (r := marathon_refusal(app, ip)) is not None:
+                                tmp.cleanup()
+                                return refuse(r)
                         f.write(chunk)
     except Exception:
         tmp.cleanup()
@@ -170,19 +228,20 @@ async def handle_analyze(request: web.Request) -> web.Response:
         return web.json_response({"error": "no file"}, status=400)
     if (r := refusal(app, ip)) is not None:  # again: parallel uploads all passed the first check
         tmp.cleanup()
-        return r
+        return refuse(r)
     job = Job(tmp, path, downbeat, ip)
     app["jobs"][job.id] = job
-    app["waiting"].append(job)
-    await app["queue"].put(job)
+    enqueue(app, job, False)  # a marathon moves over once its length is known
     return web.json_response({"job": job.id, **position(app, job)})
 
 
 def position(app, job: Job) -> dict:
-    """Where a job stands: songs queued before it, and how many are being analysed right now."""
+    """Where a job stands: songs queued before it (in its own queue), and how many of its kind are being analysed."""
     if job.status == "queued":
-        return {"status": "queued", "ahead": app["waiting"].index(job), "running": app["running"]}
-    return {"status": job.status}
+        waiting = app["mwaiting"] if job.marathon else app["waiting"]
+        return {"status": "queued", "ahead": waiting.index(job), "running": app["mrunning" if job.marathon else "running"],
+                "marathon": job.marathon}
+    return {"status": job.status, "marathon": job.marathon}
 
 
 async def handle_job(request: web.Request) -> web.Response:
@@ -195,25 +254,35 @@ async def handle_job(request: web.Request) -> web.Response:
     return web.json_response({"status": "done", **res}, status=400 if "error" in res else 200)
 
 
-async def worker(app):
-    """One of WORKERS loops: take the oldest queued song, analyse it in the process pool."""
+async def worker(app, marathon: bool = False):
+    """One of WORKERS (or MARATHON_WORKERS) loops: take the oldest queued song, analyse it in its process pool."""
     loop = asyncio.get_running_loop()
+    queue, waiting, pool = (app["mqueue"], app["mwaiting"], app["mpool"]) if marathon else (app["queue"], app["waiting"], app["pool"])
+    running = "mrunning" if marathon else "running"
+    limits = (MARATHON_MINUTES,) if marathon else (MAX_MINUTES, MARATHON_MINUTES)
     while True:
-        job = await app["queue"].get()
-        app["waiting"].remove(job)
-        app["running"] += 1
+        job = await queue.get()
+        waiting.remove(job)
+        app[running] += 1
         job.status = "running"
         try:
-            job.result = await loop.run_in_executor(app["pool"], analyse, str(job.path), job.downbeat)
+            job.result = await loop.run_in_executor(pool, analyse, str(job.path), job.downbeat, *limits)
         except Exception:
             log.exception("analysis failed")
             job.result = {"error": "something went wrong on our side"}
         finally:
-            app["running"] -= 1
-            job.status, job.done_at = "done", time.time()
-            job.tmp.cleanup()
+            app[running] -= 1
         r = job.result
-        log.info("job from %s: %s", job.ip, r.get("error") or f"{len(r['lines'])} lines in {r['seconds']:.1f}s")
+        if "marathon" in r:  # longer than a song: over to the marathon queue, if this visitor may have one
+            if (refused := marathon_refusal(app, job.ip)) is None:
+                log.info("job from %s: %.1f min, moved to the marathon queue", job.ip, r["marathon"] / 60)
+                enqueue(app, job, True)
+                continue
+            r = job.result = {"error": refused[1]}
+        job.status, job.done_at = "done", time.time()
+        job.tmp.cleanup()
+        log.info("%s from %s: %s", "marathon" if marathon else "job", job.ip,
+                 r.get("error") or f"{len(r['lines'])} lines in {r['seconds']:.1f}s")
 
 
 async def janitor(app):
@@ -224,21 +293,29 @@ async def janitor(app):
         for k in [k for k, j in app["jobs"].items() if j.done_at and now - j.done_at > JOB_TTL]:
             del app["jobs"][k]
         app["limiter"].prune()
+        app["mlimiter"].prune()
 
 
 async def start_background(app):
-    app["tasks"] = [asyncio.create_task(worker(app)) for _ in range(WORKERS)] + [asyncio.create_task(janitor(app))]
+    app["tasks"] = ([asyncio.create_task(worker(app)) for _ in range(WORKERS)]
+                    + [asyncio.create_task(worker(app, marathon=True)) for _ in range(MARATHON_WORKERS)]
+                    + [asyncio.create_task(janitor(app))])
 
 
 async def handle_health(request: web.Request) -> web.Response:
-    return web.json_response({"ok": True, "queued": len(request.app["waiting"]), "running": request.app["running"]})
+    app = request.app
+    return web.json_response({"ok": True, "queued": len(app["waiting"]), "running": app["running"],
+                              "marathons_queued": len(app["mwaiting"]), "marathons_running": app["mrunning"]})
 
 
 def make_app() -> web.Application:
-    app = web.Application(client_max_size=MAX_BYTES + (1 << 20))
+    app = web.Application(client_max_size=MARATHON_BYTES + (1 << 20))
     app["pool"] = ProcessPoolExecutor(max_workers=WORKERS, initializer=_worker_init)
+    app["mpool"] = ProcessPoolExecutor(max_workers=MARATHON_WORKERS, initializer=_worker_init, initargs=(MARATHON_THREADS,))
     app["limiter"] = Limiter(PER_IP_PER_HOUR)
+    app["mlimiter"] = Limiter(MARATHON_PER_IP_PER_DAY, 86400.0)
     app["queue"], app["waiting"], app["running"], app["jobs"] = asyncio.Queue(), [], 0, {}
+    app["mqueue"], app["mwaiting"], app["mrunning"] = asyncio.Queue(), [], 0
     app.on_startup.append(start_background)
     app.router.add_post("/analyze", handle_analyze)
     app.router.add_get("/job/{id}", handle_job)

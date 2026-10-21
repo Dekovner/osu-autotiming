@@ -8,11 +8,12 @@ beat length far tighter than any frame-based tempo estimate.
 """
 
 import os
+import weakref
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
-from numba import njit
+from numba import get_num_threads, njit, prange
 from scipy.ndimage import maximum_filter1d, median_filter, uniform_filter1d
 
 from .decode import decode_bass
@@ -66,7 +67,8 @@ def onsets(pcm: np.ndarray, sr: int, n_fft: int = N_FFT, hop_target_ms: float = 
     sub_bands = np.searchsorted(np.geomspace(30, 16000, N_BANDS + 1), 90)
     bands = np.empty((n_frames, N_BANDS), np.float32)
     step = 2048  # frames per chunk: ~70 MB of temporaries, flat whatever the song length
-    for s in range(0, n_frames, step):
+
+    def chunk(s):
         e = min(n_frames, s + step)
         a0 = s * hop - front  # first sample of this chunk in the signal's own indexing
         seg = np.zeros((e - 1 - s) * hop + n_fft, np.float32)
@@ -77,6 +79,19 @@ def onsets(pcm: np.ndarray, sr: int, n_fft: int = N_FFT, hop_target_ms: float = 
         mag = np.abs(np.fft.rfft(seg[idx] * win, axis=1))
         cs = np.concatenate([np.zeros((e - s, 1), np.float32), np.cumsum(mag, axis=1, dtype=np.float32)], axis=1)
         bands[s:e] = (cs[:, edges[1:]] - cs[:, edges[:-1]]) / np.diff(edges)
+
+    # chunks are independent and numpy lets go of the GIL on them: as many threads as numba
+    # was given in this process (1 for the site's songs, more for a marathon), at most 4 chunks
+    # of temporaries at once
+    threads = min(4, get_num_threads())
+    if threads > 1:
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(threads) as ex:
+            list(ex.map(chunk, range(0, n_frames, step)))
+    else:
+        for s in range(0, n_frames, step):
+            chunk(s)
     logb = np.log1p(np.multiply(bands, 1000, out=bands), out=bands)  # in place: one frames x bands array less
     diff = np.zeros_like(logb)
     for a in range(flux_lag, len(logb), 65536):
@@ -139,12 +154,14 @@ def coherence(times, weights, Ls) -> np.ndarray:
                       np.ascontiguousarray(Ls, np.float64))
 
 
-@njit(cache=True)
+@njit(cache=True, parallel=True)
 def _coherence(times, weights, Ls):
     """One cos/sin per (onset, L); the 1/2 and 1/4 harmonics are its square and fourth
-    power. Compiled, it runs without the onset x L temporaries numpy would allocate."""
+    power. Compiled, it runs without the onset x L temporaries numpy would allocate.
+    Beat lengths are independent: they spread over numba's threads (numba.set_num_threads;
+    the site's song workers keep 1, a marathon gets several), each summed in the same order."""
     out = np.empty(len(Ls))
-    for j in range(len(Ls)):
+    for j in prange(len(Ls)):
         k = 2 * np.pi / Ls[j]
         r1 = i1 = r2 = i2 = r4 = i4 = 0.0
         for n in range(len(times)):
@@ -1143,10 +1160,30 @@ def _energy_ms(pcm, sr, sos=None, chunk=1 << 20) -> np.ndarray:
     return acc[:n_ms] / per_ms
 
 
-def loudness_on_beat(pcm, sr, phi: float, L: float, lo: float, hi: float) -> dict:
-    """How many dB louder the 40 ms after each beat are than after each "and" (all / <150 Hz / >2 kHz)."""
+_LOUD_ENVS: dict = {}  # the last song's band envelopes, keyed by a weak reference to its samples
+
+
+def _loud_envs(pcm, sr) -> dict:
+    """5 ms boxcar of the 1 ms energy, whole song, per band (all / <150 Hz / >2 kHz). Phase features
+    ask for every long section: the song is filtered once, not once per section (half the time of a
+    marathon went there)."""
     from scipy.signal import butter
 
+    ref = _LOUD_ENVS.get("ref")
+    if ref is not None and ref() is pcm and _LOUD_ENVS["sr"] == sr:
+        return _LOUD_ENVS["envs"]
+    envs = {}
+    for name, sos in (("all", None),
+                      ("lo", butter(4, 150, "lowpass", fs=sr, output="sos")),
+                      ("hi", butter(4, 2000, "highpass", fs=sr, output="sos"))):
+        c = np.cumsum(np.concatenate([[0.0], _energy_ms(pcm, sr, sos)]))
+        envs[name] = (c[5:] - c[:-5]) / 5  # 5 ms boxcar, as before but at 1 ms resolution
+    _LOUD_ENVS.update(ref=weakref.ref(pcm), sr=sr, envs=envs)
+    return envs
+
+
+def loudness_on_beat(pcm, sr, phi: float, L: float, lo: float, hi: float) -> dict:
+    """How many dB louder the 40 ms after each beat are than after each "and" (all / <150 Hz / >2 kHz)."""
     beats = phi + np.arange(np.ceil((lo - phi) / L), np.floor((hi - phi) / L)) * L
 
     def folded(env, times):
@@ -1154,15 +1191,7 @@ def loudness_on_beat(pcm, sr, phi: float, L: float, lo: float, hi: float) -> dic
         idx = idx[(idx[:, 0] > 0) & (idx[:, -1] < len(env))]
         return float(10 * np.log10(env[idx].max(axis=1).mean() + 1e-12)) if len(idx) else 0.0
 
-    out = {}
-    for name, sos in (("all", None),
-                      ("lo", butter(4, 150, "lowpass", fs=sr, output="sos")),
-                      ("hi", butter(4, 2000, "highpass", fs=sr, output="sos"))):
-        e = _energy_ms(pcm, sr, sos)
-        c = np.cumsum(np.concatenate([[0.0], e]))
-        env = (c[5:] - c[:-5]) / 5  # 5 ms boxcar, as before but at 1 ms resolution
-        out[f"loud_{name}"] = folded(env, beats) - folded(env, beats + L / 2)
-    return out
+    return {f"loud_{name}": folded(env, beats) - folded(env, beats + L / 2) for name, env in _loud_envs(pcm, sr).items()}
 
 
 def phase_opinions(o: Onsets, pcm, sr, phi: float, L: float, lo: float, hi: float) -> tuple[bool, bool]:
@@ -1237,9 +1266,13 @@ class Timing:
     alt_segments: list[Segment] | None = None  # the same timing shifted by half a beat
 
 
-def analyze(path, downbeat_ms: float | None = None) -> Timing:
-    """Full analysis for users: red lines plus an honest flag when the beat phase is in doubt."""
-    pcm, sr = decode_bass(path)
+def analyze(path, downbeat_ms: float | None = None, decoded: tuple[np.ndarray, int] | None = None) -> Timing:
+    """Full analysis for users: red lines plus an honest flag when the beat phase is in doubt.
+
+    decoded: (pcm, sr) from decode_bass(path) if the caller has it already: an hour of audio
+    is ~600 MB of samples, a second copy is worth avoiding.
+    """
+    pcm, sr = decoded if decoded is not None else decode_bass(path)
     o = onsets(pcm, sr)
     info = {}
     segs = detect_full(o, pcm, sr, downbeat_ms, info)
