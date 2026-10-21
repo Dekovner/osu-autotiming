@@ -22,6 +22,8 @@ MAPS = {
     "2491580 QUOK - SCHAST'E LJUBIT TISHINU 2": "steady 140 (control)",
     "2478028 ReeK - Galaxy Collision": "long ramps 200 -> 150 and 156 -> 200 not tracked",
     "2589354 Mr Bill - Pastel (voljum Remix) (Cut Ver)": "syncopated: grid 3/16 beat early",
+    # not in the Songs folder: copied into data/feedback/ from the mirror (2026-10-21)
+    "2499568 Bear Ghost - Big Town Banky Blaine's Rockabilly BBQ": "accelerando 135 -> 280 to the end, one line per bar: missed",
 }
 
 
@@ -29,6 +31,8 @@ def main():
     for name in MAPS:
         src = SONGS / name
         dst = OUT / name.split()[0]
+        if not src.exists():
+            continue
         dst.mkdir(parents=True, exist_ok=True)
         for f in src.iterdir():
             if f.suffix.lower() in (".osu", ".mp3", ".ogg", ".wav") and not (dst / f.name).exists():

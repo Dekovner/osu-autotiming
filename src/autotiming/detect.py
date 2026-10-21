@@ -790,6 +790,10 @@ def steady_twin(s: Segment, phys: list[Segment]) -> Segment:
 
 
 ALIGN_PREV_W = float(_env("ALIGN_PREV_W", "0.5"))
+RAMP_MAX_SECTION_MS = float(_env("RAMP_MAX_SECTION_MS", "8000"))  # a section this short between two tempos is a ramp step
+RAMP_MIN_STEP = float(_env("RAMP_MIN_STEP", "0.05"))  # log tempo change of a step, both ramp steps the same way
+RAMP_MAX_STEP = float(_env("RAMP_MAX_STEP", "0.25"))  # a bigger step is a section at the wrong octave, not a ramp
+RAMP_TOL = float(_env("RAMP_TOL", "0.15"))  # the next section continues the ramp if this close to its prediction
 
 
 def align_octave(secs: list[Segment], steady: list[Segment]) -> list[Segment]:
@@ -798,6 +802,9 @@ def align_octave(secs: list[Segment], steady: list[Segment]) -> list[Segment]:
 
     The second term is for ritardandos the steady lines don't see: 165 -> 150 after
     a steady 220 must not become 165 -> 300, though 300 is nearer 220 than 150 is.
+    A ramp that leaves the main tempo by more than x1.75 folds into the other octave
+    in the short windows (135 -> 185, then 106 -> 140 for 212 -> 280): after two
+    short sections stepping the same way, the next one keeps going that way.
     """
     st = sorted(steady, key=lambda s: s.time)
     starts = np.array([s.time - OSU_OFFSET_MS for s in st])
@@ -807,6 +814,14 @@ def align_octave(secs: list[Segment], steady: list[Segment]) -> list[Segment]:
         prev = out[-1].beat_length if out else ref
         k = min((0.5, 1.0, 2.0), key=lambda k: abs(np.log(s.beat_length / k / ref))
                 + ALIGN_PREV_W * abs(np.log(s.beat_length / k / prev)))
+        if (len(out) >= 3 and s.time - out[-1].time < RAMP_MAX_SECTION_MS
+                and out[-1].time - out[-2].time < RAMP_MAX_SECTION_MS):
+            steps = np.log([out[-2].beat_length / out[-3].beat_length, out[-1].beat_length / out[-2].beat_length])
+            if np.all((RAMP_MIN_STEP <= np.abs(steps)) & (np.abs(steps) <= RAMP_MAX_STEP)) and steps[0] * steps[1] > 0:
+                pred = out[-1].beat_length * np.exp(steps[1])
+                kr = min((0.5, 1.0, 2.0), key=lambda k: abs(np.log(s.beat_length / k / pred)))
+                if abs(np.log(s.beat_length / kr / pred)) < RAMP_TOL:
+                    k = kr
         out.append(Segment(s.time, s.beat_length / k, s.meter))
     return out
 
@@ -819,7 +834,7 @@ def main_beat_length(o: Onsets, steady: list[Segment]) -> float:
 
 
 PHASE_MIN_BEATS = 32  # shorter steady sections take the main section's phase decision
-PHASE_UNSURE = (0.25, 0.75)  # phase model probabilities in here get the "check the and" note (half the errors, 4% of maps)
+PHASE_UNSURE = (0.15, 0.85)  # phase model probabilities in here get the "check the and" note (19/34 errors, 6.5% of maps)
 
 
 def steady_phase(o: Onsets, pcm, sr, ch, steady: list[Segment]) -> tuple[list[Segment], float | None]:

@@ -3,6 +3,7 @@
     uv run python bench/run.py synth --methods ours librosa essentia
     uv run python bench/run.py ranked --methods ours
     uv run python bench/run.py synth --summary-only --by style
+    uv run python bench/run.py ranked --ids data/subset_ramp.txt   # a subset first
 
 Results are cached per (dataset, method) in data/results/; delete a file to rerun.
 """
@@ -139,9 +140,13 @@ def main():
     p.add_argument("--rescore", action="store_true", help="recompute metrics from cached predictions")
     p.add_argument("--by", help="tag to break the summary down by")
     p.add_argument("--limit", type=int)
+    p.add_argument("--ids", help="file with one item id per line: run only these (a quick screen before the full set)")
     args = p.parse_args()
     RESULTS.mkdir(parents=True, exist_ok=True)
     items = list(DATASETS[args.dataset]())[: args.limit]
+    if args.ids:
+        keep = set(Path(args.ids).read_text().split("\n")) - {""}
+        items = [it for it in items if it["id"] in keep]
     if not args.summary_only:
         for method in args.methods:
             done = {r["id"] for r in load(args.dataset, method)}
