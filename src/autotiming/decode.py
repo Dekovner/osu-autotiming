@@ -63,6 +63,21 @@ class TooLongError(ValueError):
         self.seconds = seconds
 
 
+def bass_seconds(path) -> float:
+    """BASS's estimate of the audio's length, without decoding it (exact for most files; some
+    mp3s read short, so decode_bass still checks while it decodes)."""
+    lib = _bass()
+    h = lib.BASS_StreamCreateFile(0, str(path).encode(), 0, 0, BASS_STREAM_DECODE | BASS_SAMPLE_FLOAT)
+    if not h:
+        raise RuntimeError(f"BASS can't open {path}: error {lib.BASS_ErrorGetCode()}")
+    try:
+        info = BassChannelInfo()
+        lib.BASS_ChannelGetInfo(h, ctypes.byref(info))
+        return lib.BASS_ChannelGetLength(h, 0) / 4 / info.chans / info.freq
+    finally:
+        lib.BASS_StreamFree(h)
+
+
 def decode_bass(path, max_seconds: float | None = None) -> tuple[np.ndarray, int]:
     """Decode like osu! does. Returns (mono float32 samples, sample rate).
 

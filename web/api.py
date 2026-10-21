@@ -21,10 +21,11 @@ MARATHON_BYTES) wait in a queue of their own and run MARATHON_WORKERS at a time 
 their own processes on MARATHON_THREADS cores each, so songs never wait behind one
 and an hour of audio (~2 GB while analysed) can't run six times over; each visitor
 gets MARATHON_PER_IP_PER_DAY.
-Length, not size, makes a marathon (a 5 minute wav is 50 MB): every upload starts in
-the song queue, whose decode stops before decoding audio that is too long and hands
-it over. A file over MAX_BYTES from a visitor with no marathons left today is turned
-away while it uploads, rather than after 160 MB went through the tunnel.
+Length, not size, makes a marathon (a 5 minute wav is 50 MB): a small probe process
+reads each upload's length from BASS (no decoding, milliseconds) and queues it where
+it belongs; should BASS read an mp3 short, the song worker's decode stops at the
+limit and hands it over. A file over MAX_BYTES from a visitor with no marathons left
+today is turned away while it uploads, rather than after 160 MB went through the tunnel.
 """
 
 import asyncio
@@ -37,6 +38,7 @@ import tempfile
 import time
 from collections import defaultdict, deque
 from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 
 from aiohttp import web
@@ -65,6 +67,35 @@ def _worker_init(threads: int = 1):
 
     os.nice(10)
     numba.set_num_threads(max(1, min(threads, numba.config.NUMBA_NUM_THREADS)))
+
+
+def probe_seconds(path: str) -> float | None:
+    """Runs in the probe process: the upload's length, None if BASS can't open it (the song
+    worker then says so)."""
+    from autotiming.decode import bass_seconds
+
+    try:
+        return bass_seconds(path)
+    except Exception:
+        return None
+
+
+PROBE_TIMEOUT = 10.0  # seconds; reading a length takes milliseconds
+
+
+async def probe(app, path: Path) -> float | None:
+    """Length of an upload from the probe process, which strangers' files may crash or hang:
+    then it is replaced, and the upload goes the song queue's way (whose decode checks too)."""
+    try:
+        return await asyncio.wait_for(asyncio.get_running_loop().run_in_executor(app["probe"], probe_seconds, str(path)),
+                                      PROBE_TIMEOUT)
+    except (BrokenProcessPool, asyncio.TimeoutError):
+        log.warning("probe process lost on an upload, starting a new one")
+        old, app["probe"] = app["probe"], ProcessPoolExecutor(max_workers=1)
+        for proc in list(getattr(old, "_processes", {}).values()):
+            proc.kill()
+        old.shutdown(wait=False, cancel_futures=True)
+        return None
 
 
 def analyse(path: str, downbeat_ms: float | None, max_minutes: float, marathon_minutes: float | None = None) -> dict:
@@ -229,9 +260,17 @@ async def handle_analyze(request: web.Request) -> web.Response:
     if (r := refusal(app, ip)) is not None:  # again: parallel uploads all passed the first check
         tmp.cleanup()
         return refuse(r)
+    seconds = await probe(app, path)
+    marathon = seconds is not None and seconds > MAX_MINUTES * 60
+    if seconds is not None and seconds > MARATHON_MINUTES * 60:
+        tmp.cleanup()
+        return web.json_response({"error": f"that's {seconds / 60:.1f} minutes; the limit is {MARATHON_MINUTES:g}"}, status=413)
+    if marathon and (r := marathon_refusal(app, ip)) is not None:
+        tmp.cleanup()
+        return refuse(r)
     job = Job(tmp, path, downbeat, ip)
     app["jobs"][job.id] = job
-    enqueue(app, job, False)  # a marathon moves over once its length is known
+    enqueue(app, job, marathon)
     return web.json_response({"job": job.id, **position(app, job)})
 
 
@@ -312,6 +351,7 @@ def make_app() -> web.Application:
     app = web.Application(client_max_size=MARATHON_BYTES + (1 << 20))
     app["pool"] = ProcessPoolExecutor(max_workers=WORKERS, initializer=_worker_init)
     app["mpool"] = ProcessPoolExecutor(max_workers=MARATHON_WORKERS, initializer=_worker_init, initargs=(MARATHON_THREADS,))
+    app["probe"] = ProcessPoolExecutor(max_workers=1)
     app["limiter"] = Limiter(PER_IP_PER_HOUR)
     app["mlimiter"] = Limiter(MARATHON_PER_IP_PER_DAY, 86400.0)
     app["queue"], app["waiting"], app["running"], app["jobs"] = asyncio.Queue(), [], 0, {}
