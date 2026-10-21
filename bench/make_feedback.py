@@ -24,6 +24,7 @@ MAPS = {
     "2589354 Mr Bill - Pastel (voljum Remix) (Cut Ver)": "syncopated: grid 3/16 beat early",
     # not in the Songs folder: copied into data/feedback/ from the mirror (2026-10-21)
     "2499568 Bear Ghost - Big Town Banky Blaine's Rockabilly BBQ": "accelerando 135 -> 280 to the end, one line per bar: missed",
+    "2581097 Ashrount & polysha - ARCADEA": "back at 201 after the 134 part, every bar a beat off the mapper's \"1\"",
 }
 
 

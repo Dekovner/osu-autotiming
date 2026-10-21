@@ -16,7 +16,7 @@
 <meta property="og:image:height" content="630">
 <meta name="twitter:card" content="summary_large_image">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="timing.css?v=12">
+<link rel="stylesheet" href="timing.css?v=13">
 </head>
 <body>
 <div class="intro">
@@ -38,6 +38,7 @@
 </div>
 
 <section id="editor" class="editor" hidden>
+  <div id="notes" class="notes mono" hidden></div>
   <div class="bar mono">
     <button id="play" class="play" title="play / pause (space)"><span class="ico">▶</span> <span class="lbl">play</span></button>
     <span id="clock" class="clock">00:00:000</span>
@@ -65,6 +66,8 @@
       <div class="col-head mono">
         <span>red lines</span>
         <span class="tools">
+          <button id="all-beat-back" title="move every red line a beat earlier: &quot;1&quot; was on the wrong beat">all −1</button>
+          <button id="all-beat-fwd" title="move every red line a beat later: &quot;1&quot; was on the wrong beat">all +1</button>
           <button id="all-back" title="move every red line half a beat earlier: the grid was on the offbeat">all −½</button>
           <button id="all-fwd" title="move every red line half a beat later: the grid was on the offbeat">all +½</button>
           <button id="add" title="add a red line at the playhead (a)">+ add</button>
@@ -109,11 +112,10 @@
       <span>[TimingPoints] red lines</span>
       <span class="tools"><button id="copy">copy</button><button id="again" title="load another song">new song</button></span>
     </div>
-    <p id="notes" class="notes mono" hidden></p>
     <textarea id="text" class="mono" readonly spellcheck="false"></textarea>
   </div>
 </section>
 
-<script src="app.js?v=21"></script>
+<script src="app.js?v=22"></script>
 </body>
 </html>

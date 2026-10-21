@@ -694,11 +694,14 @@ LINE_COST = float(_env("LINE_COST", "30"))  # red-line compression of hybrid bea
 LINE_SIGMA_MS = float(_env("LINE_SIGMA_MS", "3"))
 
 
-def downbeat_anchor(o: Onsets, steady: list[Segment], ch) -> float | None:
-    """A downbeat (onset clock) on the longest steady section, chosen once by harmonic change."""
+def downbeat_anchor(o: Onsets, steady: list[Segment], ch, info: dict | None = None) -> float | None:
+    """A downbeat (onset clock) on the longest steady section, chosen once by harmonic change.
+
+    info, if given, gets "downbeat_margin" (best minus runner-up probability) and "downbeat_alt"
+    (the runner-up, in beats after the chosen "1")."""
     if ch is None or not steady:
         return None
-    from .downbeat import downbeat_phase
+    from .downbeat import downbeat_scores
     from .grid import beats as grid_beats
 
     phys = sorted([Segment(s.time - OSU_OFFSET_MS, s.beat_length, s.meter) for s in steady], key=lambda s: s.time)
@@ -707,7 +710,12 @@ def downbeat_anchor(o: Onsets, steady: list[Segment], ch) -> float | None:
     b = grid_beats([phys[k]], max(phys[k].time, o.times[0]), ends[k])
     if len(b) < 12:
         return None
-    return float(b[downbeat_phase(o, ch, b[0], phys[k].beat_length, b[0], b[-1])])
+    sc = downbeat_scores(o, ch, b[0], phys[k].beat_length, b[0], b[-1])
+    best, second = np.argsort(-sc)[:2]
+    if info is not None:
+        info["downbeat_margin"] = float(sc[best] - sc[second])
+        info["downbeat_alt"] = int((second - best) % 4)
+    return float(b[best])
 
 
 RESYNC_MIN_BEATS = int(_env("RESYNC_MIN_BEATS", "32"))  # a steady section this long gets its own downbeat guess
@@ -760,6 +768,52 @@ def bar_allowed(o: Onsets, times: np.ndarray, phys: list[Segment], anchor: float
     idx = np.arange(len(times))
     last = syncs[np.maximum(0, np.searchsorted(syncs, idx, side="right") - 1)]
     return (idx - last) % 4 == 0
+
+
+STEADY_DOWNBEATS = _env("STEADY_DOWNBEATS", "1") == "1"
+
+
+def steady_downbeats(o: Onsets, segs: list[Segment], anchor: float | None, ch) -> list[Segment]:
+    """Each steady red line after the first moves along its own grid to the nearest "1".
+
+    The steady detector puts a line where the tempo changes, which is a beat or two
+    off the bar as often as not, and the bar then counts from there to the next
+    line (ARCADEA, set 2581097: back at 201 on beat 4, a beat off the mapper for
+    the last 90 s). A section on the anchor's grid takes the anchor's bar, as the
+    tracked sections in bar_allowed() do; another one its own guess if the trees
+    are sure enough (RESYNC_LOCAL_MARGIN). first_on_downbeat() handles the first line.
+    """
+    if anchor is None or len(segs) < 2:
+        return segs
+    from .downbeat import downbeat_scores
+    from .grid import beats as grid_beats
+
+    segs = sorted(segs, key=lambda s: s.time)
+    a = anchor + OSU_OFFSET_MS
+    ends = [s.time for s in segs[1:]] + [o.times[-1] + OSU_OFFSET_MS]
+    inside = [i for i in range(len(segs)) if segs[i].time <= a < ends[i]]
+    L_main = segs[inside[0] if inside else max(range(len(segs)), key=lambda i: ends[i] - segs[i].time)].beat_length
+    out = [segs[0]]
+    for s, end in zip(segs[1:], ends[1:]):
+        L = s.beat_length
+        db = None
+        if abs(np.log(L / L_main)) < TWIN_TEMPO and abs((a - s.time + L / 2) % L - L / 2) < 10:
+            db = a
+        elif ch is not None and (end - s.time) / L >= RESYNC_MIN_BEATS:
+            b = grid_beats([s], s.time, end) - OSU_OFFSET_MS  # the audio's own clock, like onsets and chroma
+            if len(b) >= 12:
+                sc = downbeat_scores(o, ch, b[0], L, b[0], b[-1])
+                top2 = np.sort(sc)[-2:]
+                if top2[1] - top2[0] >= RESYNC_LOCAL_MARGIN:
+                    db = float(b[int(np.argmax(sc))]) + OSU_OFFSET_MS
+        if db is None:
+            out.append(s)
+            continue
+        shift = int(np.round((db - s.time) / L)) % 4
+        shift = shift - 4 if shift == 3 else shift  # the nearest "1": a beat back, or up to two on
+        t = s.time + shift * L
+        out.append(Segment(float(t), L, s.meter) if out[-1].time + L < t < end - L else s)
+    return out
 
 
 def combine(o: Onsets, steady: list[Segment], tracked, anchor: float | None = None, ch=None) -> list[Segment]:
@@ -882,21 +936,22 @@ def detect_full(o: Onsets, pcm=None, sr=None, downbeat_ms: float | None = None, 
     the phase trees pick. The tracker runs on beat probabilities around their
     main tempo and its beats are smoothed through all onsets; combine() decides
     where they replace the steady grid. info, if given, gets "phase_keep": the
-    phase model's confidence for the main section.
+    phase model's confidence for the main section, and the downbeat guess's margin
+    and runner-up (downbeat_anchor).
     """
     from .beatprob import beat_prob
     from .track import fine_sections, track_beats
 
-    ch = None
+    ch = None  # downbeat.Harmony: chords and bass for the downbeat guesses
     if pcm is not None:
-        from .downbeat import chroma
+        from .downbeat import harmony
 
-        ch = chroma(pcm, sr)
-    steady, phase_keep = steady_phase(o, pcm, sr, ch, detect_onsets(o))
+        ch = harmony(pcm, sr)
+    steady, phase_keep = steady_phase(o, pcm, sr, None if ch is None else ch.chroma, detect_onsets(o))
     if info is not None:
         info["phase_keep"] = phase_keep
     # a mapper who knows where "1" is (osu! time) overrides the guess
-    anchor = downbeat_anchor(o, steady, ch) if downbeat_ms is None else downbeat_ms - OSU_OFFSET_MS
+    anchor = downbeat_anchor(o, steady, ch, info) if downbeat_ms is None else downbeat_ms - OSU_OFFSET_MS
     if o.profile is None or o.times[-1] - o.times[0] < TRACK_MIN_MS:
         segs = steady
     else:
@@ -905,12 +960,17 @@ def detect_full(o: Onsets, pcm=None, sr=None, downbeat_ms: float | None = None, 
         secs = align_octave(fine_sections(o, main_L), steady)
         tracked = track_beats(o, secs, probs=beat_prob(o, main_L))
         segs = combine(o, steady, tracked, anchor, ch)
+    plain = segs is steady  # no tracked beats: the lines are the steady sections' own
     # 3:2 last: tracker, hybrid and downbeat model all work on the straight grid they were fitted on
     segs, triplet = triplet_beats(o, segs, downbeat_ms)
     if triplet and downbeat_ms is None:  # the old downbeat is on the straight grid: guess again on the new one
-        anchor = downbeat_anchor(o, segs, ch)
+        for k in ("downbeat_margin", "downbeat_alt"):
+            (info or {}).pop(k, None)
+        anchor = downbeat_anchor(o, segs, ch, info)
     if info is not None:
         info["triplet"] = triplet
+    if plain and STEADY_DOWNBEATS:
+        segs = steady_downbeats(o, segs, anchor, ch)
     return connect_lines(snap_bpm(first_on_downbeat(segs, anchor, ch, o), o.times[-1] + OSU_OFFSET_MS))
 
 
@@ -1048,6 +1108,7 @@ def snap_bpm(segs: list[Segment], t_end: float) -> list[Segment]:
 # which never gave a negative offset and often started in the silence before the intro.
 FIRST_LINE_LOUD_Q = 0.8
 FIRST_LINE_TOL_MS = 30.0
+FIRST_LINE_BEAT_HITS, FIRST_LINE_BEAT_MS = 2, 15.0  # loud onsets this close to beats before the line: a bar back
 
 
 def music_start(o: Onsets) -> float:
@@ -1082,6 +1143,16 @@ def first_on_downbeat(segs: list[Segment], anchor: float | None, ch, o: Onsets) 
         return segs
     lo = max(-bar, music_start(o) - FIRST_LINE_TOL_MS)
     first += np.ceil((lo - first) / bar) * bar  # earliest downbeat at or after lo on this grid
+    # but the beat may be going already: loud hits on this grid's beats in the bar before the
+    # line can't be mapped (Unorthodox Red with "1" a beat off: the whole intro hit came before
+    # the line). Mapper's first line on 750 ranked maps 47.5% -> 47.7%, 9% of lines move back
+    loud = o.times[o.strength >= np.quantile(o.strength, FIRST_LINE_LOUD_Q)] + OSU_OFFSET_MS
+    L = s0.beat_length
+    while first >= 0:
+        w = loud[(loud >= first - bar - FIRST_LINE_BEAT_MS) & (loud < first - FIRST_LINE_TOL_MS)]
+        if (np.abs((w - first + L / 2) % L - L / 2) < min(FIRST_LINE_BEAT_MS, L / 8)).sum() < FIRST_LINE_BEAT_HITS:
+            break
+        first -= bar
     if end is not None and first >= end:
         return segs
     return [Segment(float(first), s0.beat_length, s0.meter)] + segs[1:]
@@ -1264,6 +1335,14 @@ class Timing:
     segments: list[Segment]  # red lines in osu! time
     phase_uncertain: bool = False  # kick rule and phase model disagree: check the "and" too
     alt_segments: list[Segment] | None = None  # the same timing shifted by half a beat
+    downbeat_uncertain: bool = False  # the downbeat trees hardly prefer their "1" over the runner-up
+    downbeat_alt: int | None = None  # the runner-up "1", in beats after the chosen one (1..3)
+
+
+# Downbeat trees' best minus runner-up probability below this gets the "where is 1" note.
+# Out-of-fold on 686 ranked maps (94.8% right, bench/downbeat_exp.py cv): flags 6% of maps,
+# wrong on half of them, 22 of 36 errors; the runner-up is the mapper's "1" on 30 of 36.
+DOWNBEAT_UNSURE_MARGIN = 0.4
 
 
 def analyze(path, downbeat_ms: float | None = None, decoded: tuple[np.ndarray, int] | None = None) -> Timing:
@@ -1277,12 +1356,15 @@ def analyze(path, downbeat_ms: float | None = None, decoded: tuple[np.ndarray, i
     info = {}
     segs = detect_full(o, pcm, sr, downbeat_ms, info)
     alt = [Segment(s.time + s.beat_length / 2, s.beat_length, s.meter) for s in segs]
+    margin = info.get("downbeat_margin")
+    bars = dict(downbeat_uncertain=margin is not None and margin < DOWNBEAT_UNSURE_MARGIN,
+                downbeat_alt=info.get("downbeat_alt"))
     if info.get("phase_keep") is not None:
         p = info["phase_keep"]
-        return Timing(segs, phase_uncertain=PHASE_UNSURE[0] < p < PHASE_UNSURE[1], alt_segments=alt)
+        return Timing(segs, phase_uncertain=PHASE_UNSURE[0] < p < PHASE_UNSURE[1], alt_segments=alt, **bars)
     starts = [s.time - OSU_OFFSET_MS for s in segs]  # back to the audio's own clock, like onset times
     ends = starts[1:] + [o.times[-1] + 1]
     main = max(range(len(segs)), key=lambda i: ends[i] - starts[i])
     lo = starts[main] if main > 0 else o.times[0]
     rule_keeps, model_keeps = phase_opinions(o, pcm, sr, starts[main], segs[main].beat_length, lo, ends[main])
-    return Timing(segs, phase_uncertain=rule_keeps != model_keeps, alt_segments=alt)
+    return Timing(segs, phase_uncertain=rule_keeps != model_keeps, alt_segments=alt, **bars)

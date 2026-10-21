@@ -120,18 +120,19 @@ function edit(fn) {
   refresh();
 }
 
-// the whole timing by half of each line's own beat: a grid on the offbeat, ramps included.
+// the whole timing by `beats` of each line's own beat: ±½ for a grid on the offbeat, ±1 (or 2)
+// for "1" on the wrong beat of the bar, ramps included.
 // Lines of different BPM move by different amounts, so joints that were on the grid come
-// out a few ms off (a double barline): half the difference of the two beats, which no grid
-// pair can avoid. Like the detector's connect_lines, a long section at a round BPM keeps it
-// and the next line moves onto its grid; otherwise the earlier line's BPM absorbs the gap
+// out a few ms off (a double barline): the shift times the difference of the two beats, which
+// no grid pair can avoid. Like the detector's connect_lines, a long section at a round BPM keeps
+// it and the next line moves onto its grid; otherwise the earlier line's BPM absorbs the gap
 const SHIFT_JOINT_MAX = 30;  // ms: a joint the shift opened wider than this was no joint (e.g. a x2 jump)
 const isRound = (bpm) => [1, 0.5, 0.25, 0.1].some((s) => Math.abs(bpm / s - Math.round(bpm / s)) < 1e-6);
-function shiftAll(dir) {
+function shiftAll(beats) {
   if (!lines.length) return;
   commit();
   const clean = lines.map((_, i) => { const j = joint(i); return j !== null && Math.abs(j.off) < 0.5; });
-  lines = lines.map((l) => ({ ...l, time: Math.round(l.time + dir * l.beat_length / 2) }));  // order kept: sel stays
+  lines = lines.map((l) => ({ ...l, time: Math.round(l.time + beats * l.beat_length) }));  // order kept: sel stays
   lines.forEach((l, i) => {
     const j = joint(i);
     if (!clean[i] || Math.abs(j.off) < 0.5 || Math.abs(j.off) > SHIFT_JOINT_MAX) return;
@@ -598,14 +599,31 @@ async function load(file) {
   // a negative first line (the song opens on its downbeat) must be on screen too
   view = { start: lines[0].time < 0 ? lines[0].time - 300 : Math.max(0, lines[0].time - 1000), span: Math.min(8000, duration) };
   status(`${lines.length} red line${lines.length > 1 ? "s" : ""} in ${res.seconds.toFixed(1)} s`);
-  const notes = [];
-  if (phaseUncertain) notes.push("<b>beat phase uncertain</b>: if the grid feels on the offbeat, press all −½ (or all +½) above the red lines.");
-  notes.push("red lines sit on guessed downbeats; drag a line if \"1\" is elsewhere.");
-  $("notes").innerHTML = notes.join("<br>");
-  $("notes").hidden = false;
+  showNotes(res);
   $("heads-up").hidden = true;  // the editor is open now: its notes take over
   $("editor").hidden = false;
   refresh();
+}
+
+// above the waveform, where the grid is checked: a note below the red lines went unread.
+// The downbeat runner-up is "1" `downbeat_alt` beats after the chosen one; the button moves
+// the whole timing there by the shorter way (3 beats later = 1 earlier)
+function showNotes(res) {
+  const notes = [];
+  const alt = res.downbeat_alt, beats = alt == null ? 0 : alt <= 2 ? alt : alt - 4;
+  if (res.downbeat_uncertain && beats) {
+    const way = `${Math.abs(beats) === 1 ? "a beat" : "two beats"} ${beats > 0 ? "later" : "earlier"}`;
+    notes.push(`<b>not sure where "1" is</b>: play it, the high click of the metronome is "1". ` +
+      `If it isn't the start of the bar, <button id="db-alt">try "1" ${way}</button> (the second guess), or all −1 / all +1 above the red lines.`);
+  }
+  if (phaseUncertain) notes.push("<b>beat phase uncertain</b>: if the grid feels on the offbeat, press all −½ (or all +½) above the red lines.");
+  if (!notes.length) notes.push("red lines sit on guessed downbeats (the high click): if \"1\" is elsewhere, press all −1 / all +1 above the red lines.");
+  const box = $("notes");
+  box.innerHTML = notes.map((n) => `<p>${n}</p>`).join("");
+  box.classList.toggle("unsure", !!(res.downbeat_uncertain && beats) || phaseUncertain);
+  box.hidden = false;
+  const b = $("db-alt");
+  if (b) b.onclick = () => { shiftAll(beats); b.disabled = true; b.textContent = "moved (ctrl+z undoes it)"; };
 }
 
 // ---------- wiring ----------
@@ -634,8 +652,10 @@ $("half").onclick = () => edit((l) => { l.beat_length *= 2; });
 $("double").onclick = () => edit((l) => { l.beat_length /= 2; });
 $("shift").onclick = () => edit((l) => { l.time += l.beat_length / 2; });
 $("shift-back").onclick = () => edit((l) => { l.time -= l.beat_length / 2; });
-$("all-back").onclick = () => shiftAll(-1);
-$("all-fwd").onclick = () => shiftAll(1);
+$("all-back").onclick = () => shiftAll(-0.5);
+$("all-fwd").onclick = () => shiftAll(0.5);
+$("all-beat-back").onclick = () => shiftAll(-1);
+$("all-beat-fwd").onclick = () => shiftAll(1);
 document.querySelectorAll("[data-nudge]").forEach((b) => (b.onclick = () => edit((l) => { l.time += +b.dataset.nudge; })));
 $("copy").onclick = async () => {
   try { await navigator.clipboard.writeText($("text").value); } catch (e) { $("text").select(); document.execCommand("copy"); }

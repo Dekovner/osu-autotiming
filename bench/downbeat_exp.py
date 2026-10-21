@@ -1,6 +1,8 @@
 """Where is "1" in the bar? Learn the bar phase from ranked maps' red lines.
 
-    uv run python bench/downbeat_exp.py [workers]
+    uv run python bench/downbeat_exp.py [workers]   # features of every map -> data/downbeat_rows.json
+    uv run python bench/downbeat_exp.py cv          # the trees' out-of-fold accuracy and margin flag
+    uv run python bench/downbeat_exp.py final       # train the trees on every map -> models/
 
 Mappers put red lines on downbeats, so each ranked map's main 4/4 red line
 gives the bar phase. Candidates are the 4 beat phases of the main segment; each
@@ -23,7 +25,7 @@ from cache_onsets import load_onsets, path_for  # noqa: E402
 from run import DATA, ranked_items  # noqa: E402
 
 from autotiming.decode import decode_bass  # noqa: E402
-from autotiming.downbeat import bar_features, chroma  # noqa: E402
+from autotiming.downbeat import bar_features, harmony  # noqa: E402
 from autotiming.detect import OSU_OFFSET_MS  # noqa: E402
 
 OUT = DATA / "downbeat_rows.json"
@@ -41,7 +43,7 @@ def one(it):
             return None
         o = load_onsets(it["id"])
         pcm, sr = decode_bass(it["audio"])
-        ch = chroma(pcm, sr)
+        ch = harmony(pcm, sr)
         lo, hi = max(seg.time, it["span"][0]), ends[k]
         # start the window off the mapper's line (a downbeat by definition): window-based features
         # must not learn "the window starts on 1", which the detector can't know
@@ -89,6 +91,36 @@ def main():
     (DATA / "downbeat_model.json").write_text(json.dumps(model, indent=1))
 
 
+def trees_cv():
+    """Out-of-fold accuracy of the trees, and how well best-minus-runner-up flags their errors
+    (detect.DOWNBEAT_UNSURE_MARGIN)."""
+    from sklearn.ensemble import HistGradientBoostingClassifier
+    from sklearn.model_selection import GroupKFold
+
+    from autotiming.downbeat import candidate_matrix
+
+    rows = json.loads(OUT.read_text())
+    n = len(rows)
+    shift = np.random.default_rng(0).integers(0, 4, n)
+    X = np.stack([np.roll(candidate_matrix(r["feats"]), s, axis=0) for r, s in zip(rows, shift)])
+    P = np.zeros((n, 4))
+    for tr, te in GroupKFold(5).split(np.zeros(n), groups=[r["group"] for r in rows]):
+        y = np.zeros((len(tr), 4), int)
+        y[np.arange(len(tr)), shift[tr]] = 1
+        m = HistGradientBoostingClassifier(max_iter=200, learning_rate=0.05, max_leaf_nodes=15, l2_regularization=1.0)
+        m.fit(X[tr].reshape(-1, X.shape[2]), y.ravel())
+        P[te] = m.predict_proba(X[te].reshape(-1, X.shape[2]))[:, 1].reshape(len(te), 4)
+    ok = P.argmax(1) == shift
+    top2 = np.sort(P, 1)[:, -2:]
+    margin = top2[:, 1] - top2[:, 0]
+    runner_up = np.argsort(-P, 1)[:, 1] == shift
+    print(f"{n} maps; trees right (CV): {ok.mean():.1%}; runner-up right on {runner_up.sum()}/{(~ok).sum()} errors")
+    for thr in (0.1, 0.2, 0.3, 0.4, 0.5):
+        flag = margin < thr
+        print(f"   margin < {thr}: flags {flag.mean():.1%} of maps, wrong on {(~ok[flag]).mean() if flag.any() else 0:.0%} "
+              f"of them, {(~ok & flag).sum()}/{(~ok).sum()} errors; unflagged right {ok[~flag].mean():.1%}")
+
+
 def final():
     """Train the trees on every map and export them like the beat-probability model."""
     from sklearn.ensemble import HistGradientBoostingClassifier
@@ -121,5 +153,7 @@ def final():
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "final":
         final()
+    elif len(sys.argv) > 1 and sys.argv[1] == "cv":
+        trees_cv()
     else:
         main()

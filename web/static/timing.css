@@ -122,6 +122,12 @@ select { padding: 2px 4px; font-family: var(--mono); font-size: 0.78rem; }
 .joint b { color: var(--don); font-weight: 500; }
 
 .out { margin-top: 28px; }
-.notes { margin: 6px 2px; font-size: 0.75rem; color: var(--muted); }
+/* above the waveform: the grid is judged there, so the doubts must be read there */
+.notes { margin: 0 0 4px; padding: 6px 2px; font-size: 0.75rem; color: var(--muted); }
+.notes p { margin: 0; }
+.notes p + p { margin-top: 4px; }
 .notes b { color: var(--don); font-weight: 500; }
+.notes.unsure { padding: 10px 14px; border-left: 2px solid var(--don); background: #f04b3c14; color: var(--ink); font-size: 0.82rem; }
+.notes button { padding: 1px 6px; border: 1px solid #f04b3c88; color: var(--ink); }
+.notes button:hover { background: #f04b3c33; }
 textarea { width: 100%; min-height: 9.5em; padding: 10px; font-size: 0.82rem; line-height: 1.5; resize: vertical; color: var(--ink); }
