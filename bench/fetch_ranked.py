@@ -85,6 +85,27 @@ def cmd_pick(args):
           f"{len(dup)} sets from {min(len(groups), args.dup_groups)} of them; picked {len(picked)}")
 
 
+MIRRORS = (f"{API}/d/{{}}n", "https://osu.direct/api/d/{}")
+
+
+def fetch_set(set_id):
+    """The .osz from the first mirror that gives it; a rate limit (403/429) waits and tries the next."""
+    err = None
+    for attempt in range(3):
+        for url in MIRRORS:
+            try:
+                r = requests.get(url.format(set_id), headers=UA, timeout=180)
+                r.raise_for_status()
+                return r
+            except requests.RequestException as e:
+                err = e
+        if getattr(err, "response", None) is not None and err.response.status_code in (403, 429):
+            time.sleep(60 * (attempt + 1))
+        else:
+            break
+    raise err
+
+
 def cmd_download(args):
     picked = json.loads(Path(args.pick).read_text()) if args.pick else json.loads(PICK.read_text())
     sets = Path(args.out) if args.out else SETS
@@ -93,8 +114,7 @@ def cmd_download(args):
     print(f"{len(todo)} to download")
     for n, set_id in enumerate(todo, 1):
         try:
-            r = requests.get(f"{API}/d/{set_id}n", headers=UA, timeout=180)
-            r.raise_for_status()
+            r = fetch_set(set_id)
             z = zipfile.ZipFile(io.BytesIO(r.content))
             d = sets / str(set_id)
             d.mkdir(exist_ok=True)

@@ -10,6 +10,7 @@
 """
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 from numba import njit
@@ -351,6 +352,82 @@ def _runs(mask: np.ndarray, min_run: int) -> np.ndarray:
     return out
 
 
+# Run trees (bench/run_trees_exp.py): P(the tracker's beats are the mapper's over this run)
+# from the run's features, in place of the long_ok / short_ok / end_ok rules when the model
+# exists. RUN_LOG, when a list, collects every candidate run's features (bench rows).
+RUN_TREES = Path(_env("RUN_TREES", Path(__file__).resolve().parent / "models" / "run_trees.npz"))
+RUN_TREE_THR = float(_env("RUN_TREE_THR", "0.7"))  # a run the rule rejects is taken at this P
+RUN_TREE_LO = float(_env("RUN_TREE_LO", "0.3"))  # one the rule takes is dropped below this P
+RUN_LOG = None
+
+
+def run_model():
+    if _env("RUN_TREE", "1") != "1" or not RUN_TREES.exists():
+        return None
+    from .beatprob import load_model
+
+    return load_model(RUN_TREES)
+
+
+def run_keep_prob(feats: dict) -> float:
+    from .beatprob import predict_proba
+
+    m = run_model()
+    x = np.array([[feats[str(n)] for n in m["names"]]], float)
+    return float(predict_proba(m, x)[0])
+
+
+def run_features(o, steady, tracked, sb, L, k, k2, a, b, mass, start, end, thirds, **base) -> dict:
+    """What the run trees see of one candidate run of tracked beats (steady beats k..k2-1,
+    onsets a..b): the rule's numbers plus where the run sits and how the tracker moves in it."""
+    t = o.times
+    sel = (tracked.times >= sb[k] - L[k] / 2) & (tracked.times <= sb[k2 - 1] + L[k2 - 1] / 2)
+    iv = np.diff(tracked.times[sel])
+    Lr = float(np.median(L[k:k2]))
+    starts = np.array([s.time for s in steady])
+    lo_t, hi_t = sb[k], sb[k2 - 1]
+    inner = starts[(starts > lo_t) & (starts < hi_t)]
+    d_bound = np.min(np.abs(np.r_[starts[1:], np.inf] - (lo_t + hi_t) / 2)) if len(starts) > 1 else np.inf
+    song_rate = len(t) / max(1.0, t[-1] - t[0])
+    run_rate = (b - a) / max(1.0, hi_t - lo_t + Lr)
+    return {
+        **{n: float(v) for n, v in base.items()},
+        "beats": float(k2 - k),
+        "dur_s": float((hi_t - lo_t) / 1000),
+        "log_bpm": float(np.log(60000 / Lr)),
+        "pos": float((lo_t - start) / max(1.0, end - start)),
+        "at_start": float(k < RUN_END_BEATS),
+        "sup_share": float(tracked.supported[sel].mean()) if sel.any() else 0.0,
+        "iv_cv": float(np.std(iv) / np.mean(iv)) if len(iv) >= 2 else 0.0,
+        "tempo_ratio": float(np.log(np.median(iv) / Lr)) if len(iv) else 0.0,
+        "abs_tempo_ratio": float(abs(np.log(np.median(iv) / Lr))) if len(iv) else 0.0,
+        "bound_beats": float(min(d_bound / Lr, 1000.0)),
+        "crosses": float(len(inner)),
+        "n_steady": float(len(steady)),
+        "song_s": float((end - start) / 1000),
+        "density": float(run_rate / song_rate),
+        "mass_beat": float(mass / max(1, k2 - k)),
+        "thirds": float(any(x < hi_t and y > lo_t for x, y in thirds)),
+    }
+
+
+def run_aggregates(feats: list[dict]) -> dict:
+    """The song's candidate runs as a whole: a live recording has them everywhere, drifting a
+    little; a quantized song has a few, each a tracker sliding a few ms off the same grid."""
+    song_s = max(1.0, feats[0]["song_s"])
+    med = lambda k: float(np.median([f[k] for f in feats]))
+    return {
+        "agg_runs_per_min": len(feats) / song_s * 60,
+        "agg_share": float(sum(f["dur_s"] for f in feats) / song_s),
+        "agg_abs_ratio": med("abs_tempo_ratio"),
+        "agg_dev": med("dev"),
+        "agg_gain": med("gain"),
+        "agg_gain_shift": med("gain_shift"),
+        "agg_best_shift": med("best_shift"),
+        "agg_iv_cv": med("iv_cv"),
+    }
+
+
 def hybrid(o, steady: list[Segment], tracked: Beats, margin=HYBRID_MARGIN, thirds=()) -> Beats:
     """Steady beats where a steady grid explains the onsets, tracked beats where it can't.
 
@@ -388,7 +465,14 @@ def hybrid(o, steady: list[Segment], tracked: Beats, margin=HYBRID_MARGIN, third
     mass = cw[hi] - cw[lo] + 1e-9
     use_t = _runs((ct[hi] - ct[lo] - (cs[hi] - cs[lo])) / mass > margin, HYBRID_MIN_RUN)
     # judge each run of tracked beats as a whole
-    devs = {}
+    song = {}  # what the whole song is like, for the run trees: steady (electronic) or drifting (live)
+    feats_wanted = RUN_LOG is not None or run_model() is not None
+    if feats_wanted:
+        civ = np.diff(tracked.times)
+        cL = L[np.clip(np.searchsorted(sb, tracked.times[:-1]), 0, len(L) - 1)]
+        song = {"song_steady_on": cs[-1] / (cw[-1] + 1e-9), "song_tracked_on": ct[-1] / (cw[-1] + 1e-9),
+                "song_dev": float(np.median(np.abs(np.log(civ / cL)))) if len(civ) else 0.0}
+    devs, cands = {}, []  # cands: (k, k2, the rule's verdict, features) per run, decided below
     k = 0
     while k < len(use_t):
         if not use_t[k]:
@@ -402,7 +486,8 @@ def hybrid(o, steady: list[Segment], tracked: Beats, margin=HYBRID_MARGIN, third
         gain = (ct[b] - ct[a] - (cs[b] - cs[a])) / mass
         # the same grid a few ms later is not a tempo change: soft attacks (pads, a quiet
         # intro or break) peak 5-25 ms late, and a free tracker follows them
-        shifted = max(np.sum(w[a:b] * _on_grid(t[a:b], q_s + d, HYBRID_TOL_MS)) for d in SHIFTS) / mass
+        on_shift = [np.sum(w[a:b] * _on_grid(t[a:b], q_s + d, HYBRID_TOL_MS)) for d in SHIFTS]
+        shifted = max(on_shift) / mass
         gain_shift = (ct[b] - ct[a]) / mass - shifted
         # how far the tracked tempo really leaves the steady one (4-beat average): a ritardando
         # moves 3-10%, a tracker wobbling on the same tempo stays within ~1%
@@ -419,6 +504,13 @@ def hybrid(o, steady: list[Segment], tracked: Beats, margin=HYBRID_MARGIN, third
             if len(ma) >= 2:
                 jump = float(np.max(np.abs(np.diff(np.log(ma)))))
         net_steady = float(abs(np.log(L[min(k2 + 1, len(L) - 1)] / L[max(k - 2, 0)])))
+        feats = None
+        if feats_wanted:
+            feats = run_features(o, steady, tracked, sb, L, k, k2, a, b, mass, start, end, thirds,
+                                 gain=gain, gain_shift=gain_shift, steady_on=(cs[b] - cs[a]) / mass,
+                                 tracked_on=(ct[b] - ct[a]) / mass, shifted=shifted, dev=dev, net=net,
+                                 net_steady=net_steady, jump=min(jump, 1.0), at_end=float(k2 >= len(use_t) - RUN_END_BEATS),
+                                 best_shift=abs(float(SHIFTS[int(np.argmax(on_shift))])), **song)
         if _env("HYBRID_DEBUG"):
             print(f"run {sb[k] - 20.4:.0f}-{sb[k2 - 1] - 20.4:.0f} beats {k2 - k} gain {gain:.2f} vs shifted {gain_shift:.2f} "
                   f"steady {(cs[b] - cs[a]) / mass:.2f} shifted {shifted:.2f} tracked {(ct[b] - ct[a]) / mass:.2f} "
@@ -430,12 +522,23 @@ def hybrid(o, steady: list[Segment], tracked: Beats, margin=HYBRID_MARGIN, third
         end_ok = (k2 >= len(use_t) - RUN_END_BEATS and gain_shift >= RUN_SHORT_SHIFT_GAIN
                   and net >= RUN_SHORT_MIN_NET and jump <= RUN_END_MAX_JUMP)
         devs[k] = dev
-        if not (long_ok or short_ok or end_ok):
+        cands.append((k, k2, long_ok or short_ok or end_ok, feats))
+        k = k2
+    if feats_wanted and cands:  # the trees also see the song's whole set of candidates
+        agg = run_aggregates([f for *_, f in cands])
+        for *_, f in cands:
+            f.update(agg)
+    for k, k2, accept, feats in cands:
+        if RUN_LOG is not None:
+            RUN_LOG.append({"a": float(sb[k] - L[k] / 2), "b": float(sb[k2 - 1] + L[k2 - 1] / 2), "rule": float(accept), **feats})
+        if run_model() is not None:  # the trees overrule the rule only when sure of it
+            pk = run_keep_prob(feats)
+            accept = pk >= RUN_TREE_THR or (accept and pk >= RUN_TREE_LO)
+        if not accept:
             use_t[k:k2] = False
         elif k2 >= len(use_t) - RUN_END_BEATS:  # no steady tempo left to go back to: the run ends the song
             use_t[k2:] = True
-            k2 = len(use_t)
-        k = k2
+            break
 
     def nearest_gap(times):  # each steady beat to the nearest tracked one
         j = np.clip(np.searchsorted(times, sb), 1, len(times) - 1)

@@ -115,6 +115,8 @@ DATASETS = {
     "nominated": lambda: ranked_items(DATA / "nominated"),
     # maps mappers reported after testing the bot by hand (bench/make_feedback.py)
     "feedback": lambda: ranked_items(DATA / "feedback"),
+    # ranked sets picked for their many tempo changes (bench/fetch_heavy.py)
+    "heavy": lambda: ranked_items(DATA / "heavy"),
     # songs visitors corrected on auneu.space/timing (bench/fetch_site.sh): what the detector gets wrong
     "site": site_items,
 }
