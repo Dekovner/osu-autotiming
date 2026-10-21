@@ -676,6 +676,46 @@ $("copy").onclick = async () => {
 };
 $("again").onclick = () => $("file").click();
 
+// timing from elsewhere (a mapper's own, another tool's) replaces the red lines, to check it on the
+// waveform and the metronome, or to send as the fix. Takes [TimingPoints] lines or a whole .osu:
+// time,beatLength,meter,sampleSet,sampleIndex,volume,uninherited,effects; red lines only
+function parseTiming(text) {
+  const sec = text.match(/\[TimingPoints\]([\s\S]*?)(?:\n\s*\[|$)/);
+  const out = [];
+  for (const row of (sec ? sec[1] : text).split(/\r?\n/)) {
+    const f = row.trim().split(",").map((x) => x.trim());
+    if (f.length < 2) continue;
+    const time = parseFloat(f[0]), L = parseFloat(f[1]);
+    const red = f.length >= 7 ? f[6] === "1" : L > 0;
+    if (!red || !Number.isFinite(time) || !Number.isFinite(L) || L <= 0 || L > 10000) continue;
+    const meter = parseInt(f[2], 10);
+    out.push({ time: Math.round(time), beat_length: L, meter: meter >= 1 && meter <= 32 ? meter : 4 });
+  }
+  return out.sort((a, b) => a.time - b.time);
+}
+function pasteTiming(text) {
+  if (!buffer && !lines.length) return;
+  const got = parseTiming(text || "");
+  if (!got.length) { status("no red lines in what you pasted: copy the [TimingPoints] of an .osu (or the whole file)", true); return; }
+  commit();
+  sel = 0;
+  setLines(got, false);
+  firstRef = got[0].time;
+  status(`pasted ${got.length} red line${got.length > 1 ? "s" : ""} (ctrl+z undoes it)`);
+}
+$("paste").onclick = async () => {
+  let text = null;
+  try { text = await navigator.clipboard.readText(); } catch (e) { /* no clipboard access: ask */ }
+  if (text === null) text = prompt("Paste the [TimingPoints] lines here:", "");
+  if (text !== null) pasteTiming(text);
+};
+document.addEventListener("paste", (e) => {
+  const t = e.target;  // anywhere but the fields, the [TimingPoints] box included
+  if ($("editor").hidden || t.tagName === "INPUT" || t.tagName === "SELECT" || (t.tagName === "TEXTAREA" && t.id !== "text")) return;
+  e.preventDefault();
+  pasteTiming(e.clipboardData.getData("text"));
+});
+
 // a visitor's fix goes to the server with the song (web/api.py, POST /feedback): the songs the
 // detector gets wrong, with the timing that is right, are the bench set it is missing
 const FIX_MAX_MB = 30;  // web/api.py MAX_BYTES: songs, not marathons
