@@ -1009,8 +1009,24 @@ def snap_bpm(segs: list[Segment], t_end: float) -> list[Segment]:
     return out
 
 
+# Which bar the first red line starts on: the first downbeat once the music has started
+# (first onset in the loudest 20%, osu! time, less FIRST_LINE_TOL_MS), which is before 0 ms
+# when the song opens on its downbeat (ranked maps at -15, -24, ...). Mapper's bar on 441
+# ranked maps where only the bar was in question: 73.7%, vs 63.3% for "first downbeat >= 0",
+# which never gave a negative offset and often started in the silence before the intro.
+FIRST_LINE_LOUD_Q = 0.8
+FIRST_LINE_TOL_MS = 30.0
+
+
+def music_start(o: Onsets) -> float:
+    """osu! time of the first loud onset: where the music really starts."""
+    loud = np.flatnonzero(o.strength >= np.quantile(o.strength, FIRST_LINE_LOUD_Q))
+    return float(o.times[loud[0]] if len(loud) else o.times[0]) + OSU_OFFSET_MS
+
+
 def first_on_downbeat(segs: list[Segment], anchor: float | None, ch, o: Onsets) -> list[Segment]:
-    """Move the first red line to its section's first downbeat at or after 0 ms (same grid)."""
+    """Move the first red line to its section's first downbeat once the music has started (same grid),
+    negative when the song opens on a downbeat."""
     if not segs:
         return segs
     from .downbeat import downbeat_phase
@@ -1032,7 +1048,8 @@ def first_on_downbeat(segs: list[Segment], anchor: float | None, ch, o: Onsets) 
         first = b[downbeat_phase(o, ch, bp[0], s0.beat_length, bp[0], bp[-1])]
     else:
         return segs
-    first -= np.floor(first / bar) * bar  # earliest downbeat >= 0 on this grid
+    lo = max(-bar, music_start(o) - FIRST_LINE_TOL_MS)
+    first += np.ceil((lo - first) / bar) * bar  # earliest downbeat at or after lo on this grid
     if end is not None and first >= end:
         return segs
     return [Segment(float(first), s0.beat_length, s0.meter)] + segs[1:]

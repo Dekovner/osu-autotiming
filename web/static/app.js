@@ -520,7 +520,8 @@ async function load(file) {
   lines = res.lines.map((l) => ({ time: Math.round(l.time), beat_length: l.beat_length, meter: l.meter }));
   sel = 0;
   cursor = lines[0].time;
-  view = { start: Math.max(0, lines[0].time - 1000), span: Math.min(8000, duration) };
+  // a negative first line (the song opens on its downbeat) must be on screen too
+  view = { start: lines[0].time < 0 ? lines[0].time - 300 : Math.max(0, lines[0].time - 1000), span: Math.min(8000, duration) };
   status(`${lines.length} red line${lines.length > 1 ? "s" : ""} in ${res.seconds.toFixed(1)} s`);
   const notes = [];
   if (phaseUncertain) notes.push("<b>beat phase uncertain</b>: if the grid feels on the offbeat, select the first line and press ½ beat.");
