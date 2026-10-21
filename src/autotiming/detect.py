@@ -9,7 +9,7 @@ beat length far tighter than any frame-based tempo estimate.
 
 import os
 import weakref
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -1017,7 +1017,8 @@ def steady_phase(o: Onsets, pcm, sr, ch, steady: list[Segment]) -> tuple[list[Se
     return out, probs[main]
 
 
-def detect_full(o: Onsets, pcm=None, sr=None, downbeat_ms: float | None = None, info: dict | None = None) -> list[Segment]:
+def detect_full(o: Onsets, pcm=None, sr=None, downbeat_ms: float | None = None, info: dict | None = None,
+                refine: bool = True) -> list[Segment]:
     """Steady detector, then the beat tracker wherever the tempo really moves.
 
     Steady red lines come first (precise and phase-consistent), each on the beat
@@ -1059,7 +1060,65 @@ def detect_full(o: Onsets, pcm=None, sr=None, downbeat_ms: float | None = None, 
         info["triplet"] = triplet
     if plain and STEADY_DOWNBEATS:
         segs = steady_downbeats(o, segs, anchor, ch)
-    return connect_lines(snap_bpm(first_on_downbeat(segs, anchor, ch, o), o.times[-1] + OSU_OFFSET_MS))
+    segs = connect_lines(snap_bpm(first_on_downbeat(segs, anchor, ch, o), o.times[-1] + OSU_OFFSET_MS))
+    return refine_junk(o, pcm, sr, segs) if refine and REFINE_JUNK and pcm is not None else segs
+
+
+# A section shorter than the ~10 s tempo windows can come out as a run of lines a bar or two
+# long, each at a different tempo (the user's 08:21 song: 100 BPM for 8 s between 150 and a
+# ramp became 199, 193, 148, 126, 123, 143). Analysed on its own, the same span is one steady
+# grid: the neighbours' tempos no longer pull the windows. Such runs are re-detected from
+# their own audio and replaced if the new lines explain the onsets on beats, halves and
+# quarters at least as well on average: junk fits off-grid quarters, not the beat, and a real
+# ramp is not one grid, so it stays. Onset strengths are clipped at JUNK_CLIP_Q of the span: two
+# sound effects 10x louder than the music (05:03, 05:06) otherwise pull the lone grid to 122.75.
+REFINE_JUNK = _env("REFINE_JUNK", "1") == "1"
+JUNK_MAX_BEATS = 8.5  # a line covering up to two bars
+JUNK_MIN_LINES = 3
+JUNK_SUBDIVS = (1, 2, 4)
+JUNK_CLIP_Q = 0.9
+
+
+def junk_runs(segs: list[Segment]) -> list[tuple[int, int]]:
+    """(i, j): lines i..j-1 are a run of JUNK_MIN_LINES or more short ones (the last line is open-ended)."""
+    short = [(b.time - a.time) / a.beat_length < JUNK_MAX_BEATS for a, b in zip(segs, segs[1:])]
+    runs, i = [], 0
+    while i < len(short):
+        j = i
+        while j < len(short) and short[j]:
+            j += 1
+        if j - i >= JUNK_MIN_LINES:
+            runs.append((i, j))
+        i = j + 1
+    return runs
+
+
+def refine_junk(o: Onsets, pcm, sr, segs: list[Segment]) -> list[Segment]:
+    for i, j in reversed(junk_runs(segs)):  # back to front: earlier indices stay valid
+        a, b = segs[i].time - OSU_OFFSET_MS, segs[j].time - OSU_OFFSET_MS  # audio clock
+        x = pcm[int(a / 1000 * sr):int(b / 1000 * sr)]
+        ox = onsets(x, sr)
+        if len(ox.times):
+            ox = replace(ox, strength=np.minimum(ox.strength, np.quantile(ox.strength, JUNK_CLIP_Q)))
+        try:
+            new = detect_full(ox, x, sr, refine=False)
+        except NoRhythmError:
+            continue
+        new = [Segment(s.time + a, s.beat_length, s.meter) for s in new]
+        # the slice's first line sits on its first "1": back by whole bars to where the run began
+        bar = 4 * new[0].beat_length
+        new[0] = Segment(new[0].time - np.floor((new[0].time - segs[i].time + new[0].beat_length / 2) / bar) * bar,
+                         new[0].beat_length, new[0].meter)
+        sel = (o.times >= a) & (o.times < b)
+        t, w = o.times[sel], weights(o)[sel]
+        if len(t) < MIN_ONSETS:
+            continue
+        w = np.minimum(w, np.quantile(w, JUNK_CLIP_Q))
+        clock = lambda ss: [Segment(s.time - OSU_OFFSET_MS, s.beat_length) for s in ss]
+        score = lambda ss: np.mean([piecewise_excess(t, w, clock(ss), subdiv=k) for k in JUNK_SUBDIVS])
+        if len(new) < j - i and score(new) >= score(segs[i:j]):
+            segs = segs[:i] + new + segs[j:]
+    return connect_lines(segs)
 
 
 CONNECT_MAX_MS = 15.0  # a line further off the previous grid is a real reset, not a fitting gap
