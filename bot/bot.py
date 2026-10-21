@@ -34,15 +34,18 @@ def _worker_init():
 
 def analyse_file(path: str, downbeat_ms: float | None) -> dict:
     """Runs in the worker process. Returns plain data for the reply."""
-    from autotiming.decode import decode_bass
+    from autotiming.decode import TooLongError, decode_bass
     from autotiming.detect import NoRhythmError, analyze
     from autotiming.osufile import timing_lines
 
     t0 = time.time()
     try:
-        pcm, sr = decode_bass(path)
+        pcm, sr = decode_bass(path, max_seconds=MAX_MINUTES * 60)
+    except TooLongError as e:
+        return {"error": f"That's {e.seconds / 60:.1f} minutes; the limit is {MAX_MINUTES:g}."}
     except Exception as e:  # not audio BASS can read
-        return {"error": f"Couldn't read that file as audio ({e})."}
+        log.info("undecodable upload: %s", e)
+        return {"error": "Couldn't read that file as audio."}
     minutes = len(pcm) / sr / 60
     if minutes > MAX_MINUTES:
         return {"error": f"That's {minutes:.1f} minutes; the limit is {MAX_MINUTES:g}."}

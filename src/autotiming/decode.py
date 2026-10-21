@@ -55,8 +55,20 @@ def _bass():
     return lib
 
 
-def decode_bass(path) -> tuple[np.ndarray, int]:
-    """Decode like osu! does. Returns (mono float32 samples, sample rate)."""
+class TooLongError(ValueError):
+    """The audio runs past decode_bass's max_seconds; seconds is BASS's estimate of its length."""
+
+    def __init__(self, seconds: float):
+        super().__init__(f"{seconds / 60:.1f} minutes of audio")
+        self.seconds = seconds
+
+
+def decode_bass(path, max_seconds: float | None = None) -> tuple[np.ndarray, int]:
+    """Decode like osu! does. Returns (mono float32 samples, sample rate).
+
+    With max_seconds, longer audio raises TooLongError before it is decoded: a few MB
+    of near-silent ogg hold hours of audio, gigabytes once decoded.
+    """
     lib = _bass()
     h = lib.BASS_StreamCreateFile(0, str(path).encode(), 0, 0, BASS_STREAM_DECODE | BASS_SAMPLE_FLOAT)
     if not h:
@@ -67,13 +79,19 @@ def decode_bass(path) -> tuple[np.ndarray, int]:
         # downmix each chunk straight into one preallocated mono array: holding the
         # interleaved stereo and its copies cost ~3x the song in memory
         n_bytes = lib.BASS_ChannelGetLength(h, 0)  # BASS_POS_BYTE; an estimate for some mp3s
-        out = np.empty(max(1, n_bytes // 4 // info.chans + 1), np.float32)
+        n_est = n_bytes // 4 // info.chans
+        limit = None if max_seconds is None else int(max_seconds * info.freq)
+        if limit is not None and n_est > limit:
+            raise TooLongError(n_est / info.freq)
+        out = np.empty(max(1, n_est + 1), np.float32)
         pos = 0
         buf = (ctypes.c_float * (1 << 18))()
         while True:
             n = lib.BASS_ChannelGetData(h, buf, ctypes.sizeof(buf) | BASS_DATA_FLOAT)
             if n == 0xFFFFFFFF or n == 0:
                 break
+            if limit is not None and pos > limit:  # the length estimate was short
+                raise TooLongError(pos / info.freq)
             mono = np.frombuffer(buf, dtype=np.float32, count=n // 4).reshape(-1, info.chans).mean(axis=1)
             if pos + len(mono) > len(out):
                 out = np.resize(out, max(2 * len(out), pos + len(mono)))

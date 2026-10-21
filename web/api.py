@@ -13,12 +13,14 @@ GET /job/<id>
 The waveform and the 1 ms energy envelope come from the BASS decode osu! uses,
 so the page can line its own (browser) decode up with osu! time. Songs wait
 in one queue (the page shows its place in it) and are analysed in API_WORKERS
-niced processes; a per-IP limit and a queue cap keep one visitor from filling it.
+niced processes; per-IP limits (songs an hour, songs waiting at once) and a queue
+cap keep one visitor from filling it.
 """
 
 import asyncio
 import base64
 import logging
+import math
 import os
 import secrets
 import tempfile
@@ -36,6 +38,7 @@ MAX_MINUTES = float(os.environ.get("MAX_MINUTES", "15"))
 WORKERS = int(os.environ.get("API_WORKERS", "2"))
 PER_IP_PER_HOUR = int(os.environ.get("PER_IP_PER_HOUR", "60"))
 MAX_QUEUE = int(os.environ.get("MAX_QUEUE", "30"))  # songs waiting; beyond this new uploads are turned away
+PER_IP_PENDING = int(os.environ.get("PER_IP_PENDING", "3"))  # one visitor's songs queued or running at once
 JOB_TTL = 600.0  # seconds a finished result is kept for the page to fetch
 AUDIO_EXT = {".mp3", ".ogg", ".wav"}
 
@@ -48,17 +51,17 @@ def analyse(path: str, downbeat_ms: float | None) -> dict:
     """Runs in a worker process: plain data only."""
     import numpy as np
 
-    from autotiming.decode import decode_bass
+    from autotiming.decode import TooLongError, decode_bass
     from autotiming.detect import OSU_OFFSET_MS, NoRhythmError, analyze
 
     t0 = time.time()
     try:
-        pcm, sr = decode_bass(path)
+        pcm, sr = decode_bass(path, max_seconds=MAX_MINUTES * 60)
+    except TooLongError as e:
+        return {"error": f"that's {e.seconds / 60:.1f} minutes; the limit is {MAX_MINUTES:g}"}
     except Exception as e:
-        return {"error": f"couldn't read that file as audio ({e})"}
-    minutes = len(pcm) / sr / 60
-    if minutes > MAX_MINUTES:
-        return {"error": f"that's {minutes:.1f} minutes; the limit is {MAX_MINUTES:g}"}
+        log.info("undecodable upload: %s", e)
+        return {"error": "couldn't read that file as audio"}
     # 1 ms min/max for drawing, 1 ms energy for lining the browser's decode up with this one
     spm = sr / 1000.0
     n = int(len(pcm) / spm)
@@ -100,6 +103,11 @@ class Limiter:
         q.append(now)
         return True
 
+    def prune(self):
+        now = time.time()
+        for k in [k for k, q in self.hits.items() if not q or now - q[-1] > 3600]:
+            del self.hits[k]
+
 
 class Job:
     def __init__(self, tmp: tempfile.TemporaryDirectory, path: Path, downbeat: float | None, ip: str):
@@ -108,12 +116,21 @@ class Job:
         self.status, self.result, self.done_at = "queued", None, None
 
 
+def refusal(app, ip: str) -> web.Response | None:
+    """Turn an upload away when the queue is full or this visitor already has songs in it."""
+    if len(app["waiting"]) >= MAX_QUEUE:
+        return web.json_response({"error": "the queue is full right now, try again in a minute"}, status=503)
+    if sum(j.ip == ip and j.status != "done" for j in app["jobs"].values()) >= PER_IP_PENDING:
+        return web.json_response({"error": f"you already have {PER_IP_PENDING} songs in the queue, wait for them"}, status=429)
+    return None
+
+
 async def handle_analyze(request: web.Request) -> web.Response:
     """Take the upload, queue it, answer at once with the job id and how many songs are ahead."""
     app = request.app
     ip = request.headers.get("X-Real-IP") or request.remote or "?"
-    if len(app["waiting"]) >= MAX_QUEUE:
-        return web.json_response({"error": "the queue is full right now, try again in a minute"}, status=503)
+    if (r := refusal(app, ip)) is not None:
+        return r
     if not app["limiter"].allow(ip):
         return web.json_response({"error": "too many songs from you this hour, try later"}, status=429)
     reader = await request.multipart()
@@ -126,6 +143,8 @@ async def handle_analyze(request: web.Request) -> web.Response:
                 if txt:
                     try:
                         downbeat = float(txt)
+                        if not math.isfinite(downbeat):
+                            raise ValueError(txt)
                     except ValueError:
                         tmp.cleanup()
                         return web.json_response({"error": "downbeat must be a number of ms"}, status=400)
@@ -149,6 +168,9 @@ async def handle_analyze(request: web.Request) -> web.Response:
     if path is None:
         tmp.cleanup()
         return web.json_response({"error": "no file"}, status=400)
+    if (r := refusal(app, ip)) is not None:  # again: parallel uploads all passed the first check
+        tmp.cleanup()
+        return r
     job = Job(tmp, path, downbeat, ip)
     app["jobs"][job.id] = job
     app["waiting"].append(job)
@@ -201,6 +223,7 @@ async def janitor(app):
         now = time.time()
         for k in [k for k, j in app["jobs"].items() if j.done_at and now - j.done_at > JOB_TTL]:
             del app["jobs"][k]
+        app["limiter"].prune()
 
 
 async def start_background(app):

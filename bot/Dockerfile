@@ -21,4 +21,7 @@ COPY bot ./bot
 COPY web/api.py ./web/api.py
 
 ENV PYTHONUNBUFFERED=1 AUTOTIMING_BASS_DIR=/opt/bass NUMBA_CACHE_DIR=/tmp/numba OMP_NUM_THREADS=1
+# uploads go through BASS, a closed native decoder: don't let it run as root
+RUN useradd --system --uid 10001 --no-create-home timing
+USER timing
 CMD ["python", "bot/bot.py"]

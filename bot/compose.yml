@@ -28,6 +28,9 @@ services:
       - "127.0.0.1:8431:8431"   # localhost only
     cpus: 7.0               # the bot's 4 cores went to the site when the bot was switched off
     mem_limit: 6g
+    cap_drop: [ALL]         # strangers' files go through a native decoder in here
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 256
     logging:
       options:
         max-size: "5m"
