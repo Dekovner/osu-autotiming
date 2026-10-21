@@ -52,7 +52,7 @@ body {
 .drop-name { font: 500 1.05rem var(--display); }
 .drop-meta { font-size: 0.75rem; color: var(--muted); }
 .drop-row:hover .drop-name, .drop.over .drop-name { color: var(--don); }
-.heads-up { margin: 0; padding: 0 2px 14px; font-size: 0.72rem; line-height: 1.55; color: var(--muted); opacity: .8; }
+.heads-up { margin: 6px 0 0; max-width: 46ch; font-size: 0.7rem; line-height: 1.5; color: var(--muted); opacity: .8; }
 .heads-up b { margin-right: 6px; color: var(--don); font-weight: 500; }
 .status { display: flex; align-items: center; gap: 12px; margin: 0; padding: 0 2px 16px; font-size: 0.8rem; color: var(--muted); }
 .status.err { color: var(--don); }

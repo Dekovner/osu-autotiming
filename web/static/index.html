@@ -6,7 +6,7 @@
 <title>auneu · timing</title>
 <meta name="description" content="Automatic osu! timing from audio: BPM, offset and red lines, with an editor to check and fine-tune them.">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="timing.css?v=9">
+<link rel="stylesheet" href="timing.css?v=10">
 </head>
 <body>
 <div class="intro">
@@ -14,6 +14,7 @@
   <a class="home" href="/">auneu</a>
   <h1>timing</h1>
   <p class="sub">red lines from audio · <span class="mono">BPM, offset, downbeats</span></p>
+  <p id="heads-up" class="heads-up mono"><b>heads up</b> it's a guess and can be wrong: check it in the editor, that's what it's for</p>
 </header>
 
 <section id="drop" class="drop">
@@ -22,7 +23,6 @@
     <span class="drop-name">drop a song here</span>
     <span class="drop-meta mono">mp3 · ogg · wav · up to 30 MB, 15 min</span>
   </label>
-  <p class="heads-up mono"><b>heads up</b> the timing is a guess and can be wrong: BPM, offset, downbeats. check it in the editor that opens below before you map on it, that's what it's there for.</p>
   <p id="status" class="status mono" hidden><span class="dots" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span><span class="msg"></span></p>
 </section>
 </div>
@@ -101,6 +101,6 @@
   </div>
 </section>
 
-<script src="app.js?v=13"></script>
+<script src="app.js?v=14"></script>
 </body>
 </html>

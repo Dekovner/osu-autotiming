@@ -527,6 +527,7 @@ async function load(file) {
   notes.push("red lines sit on guessed downbeats; drag a line if \"1\" is elsewhere.");
   $("notes").innerHTML = notes.join("<br>");
   $("notes").hidden = false;
+  $("heads-up").hidden = true;  // the editor is open now: its notes take over
   $("editor").hidden = false;
   refresh();
 }
