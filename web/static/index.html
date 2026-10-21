@@ -16,7 +16,7 @@
 <meta property="og:image:height" content="630">
 <meta name="twitter:card" content="summary_large_image">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="timing.css?v=11">
+<link rel="stylesheet" href="timing.css?v=12">
 </head>
 <body>
 <div class="intro">
@@ -33,7 +33,7 @@
     <span class="drop-name">drop a song here</span>
     <span class="drop-meta mono">mp3 · ogg · wav · up to 30 MB, 15 min</span>
   </label>
-  <p id="status" class="status mono" hidden><span class="dots" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span><span class="msg"></span></p>
+  <p id="status" class="status mono" hidden><canvas id="dots" class="dots" aria-hidden="true"></canvas><span class="msg"></span></p>
 </section>
 </div>
 
@@ -111,6 +111,6 @@
   </div>
 </section>
 
-<script src="app.js?v=15"></script>
+<script src="app.js?v=16"></script>
 </body>
 </html>

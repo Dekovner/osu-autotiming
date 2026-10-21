@@ -460,6 +460,59 @@ function status(msg, err = false, busy = false) {
   p.querySelector(".msg").textContent = msg || "";
   p.classList.toggle("err", err);
   p.classList.toggle("busy", busy && !err);
+  setBusy(busy && !err);
+}
+
+// ---------- busy dots ----------
+// Drawn on a canvas every frame: 1.4 s each way eased by cubic-bezier(.45, 0, .55, 1), each dot
+// 0.1 s ahead of the one before, dimmer at the turns. Where the row bunches up, neighbours come
+// 2 * DOT_TRAVEL * (max slope) * lead closer: at a 9 px gap they touched (centres 5.9 px apart,
+// 6 px dots) and the one drawn on top nibbled at the other, which looked like a tremor. 11 px
+// keeps them 1.9 px apart at the tightest.
+
+const DOT_N = 5, DOT_GAP = 11, DOT_R = 3, DOT_TRAVEL = 24, DOT_MS = 1400, DOT_LEAD_MS = 100;
+const dotEase = cubicBezier(0.45, 0, 0.55, 1);
+let dotsRaf = 0, dots0 = 0;
+
+function cubicBezier(x1, y1, x2, y2) {
+  const at = (a, b, t) => 3 * a * (1 - t) ** 2 * t + 3 * b * (1 - t) * t * t + t ** 3;
+  return (x) => {
+    let lo = 0, hi = 1;  // the curve's x is monotone: bisect for the t where it equals x
+    for (let k = 0; k < 24; k++) { const m = (lo + hi) / 2; if (at(x1, x2, m) < x) lo = m; else hi = m; }
+    return at(y1, y2, (lo + hi) / 2);
+  };
+}
+
+function drawDots(now) {
+  const c = $("dots"), dpr = window.devicePixelRatio || 1, w = c.clientWidth, h = c.clientHeight;
+  if (c.width !== Math.round(w * dpr) || c.height !== Math.round(h * dpr)) {
+    c.width = Math.round(w * dpr); c.height = Math.round(h * dpr);
+  }
+  const g = c.getContext("2d"), css = getComputedStyle(document.documentElement);
+  const colors = [css.getPropertyValue("--don").trim(), css.getPropertyValue("--kat").trim()];
+  const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, w, h);
+  for (let i = 0; i < DOT_N; i++) {
+    let x = 0, alpha = 0.8;
+    if (!still) {
+      const t = (now - dots0 + i * DOT_LEAD_MS) / DOT_MS, n = Math.floor(t);
+      const p = n % 2 ? 1 - (t - n) : t - n;  // alternate: every other pass runs backwards
+      x = DOT_TRAVEL * dotEase(p);
+      alpha = p < 0.5 ? 0.45 + 0.55 * dotEase(2 * p) : 1 - 0.55 * dotEase(2 * p - 1);
+    }
+    g.globalAlpha = alpha;
+    g.fillStyle = colors[i % 2];
+    g.beginPath();
+    g.arc(DOT_R + i * DOT_GAP + x, h / 2, DOT_R, 0, 2 * Math.PI);
+    g.fill();
+  }
+  dotsRaf = still ? 0 : requestAnimationFrame(drawDots);
+}
+
+function setBusy(on) {
+  if (on && !dotsRaf) { dots0 = performance.now(); dotsRaf = requestAnimationFrame(drawDots); }
+  if (!on && dotsRaf) { cancelAnimationFrame(dotsRaf); dotsRaf = 0; }
 }
 
 // upload, then ask once a second where the song is: in the queue, being analysed, or done
