@@ -25,10 +25,10 @@ services:
       API_HOST: 0.0.0.0
       API_WORKERS: 6        # songs at once from the site
       MARATHON_WORKERS: 1   # plus one marathon (up to 60 min) at a time, in its own process,
-      MARATHON_THREADS: 4   # on 4 cores (37 min: 47 s on one, 26 s on 4; 8 barely faster)
+      MARATHON_THREADS: 2   # on 2 threads (37 min: 47 s on one, 26 s on 4)
     ports:
       - "127.0.0.1:8431:8431"   # localhost only
-    cpus: 11.0              # 7 for songs (the bot's 4 cores went to the site), 4 for the marathon; 1 of 12 left to the host
+    cpus: 7.0               # all of it, marathon included: the host can't spare more (songs and a marathon share when busy)
     mem_limit: 9g           # 6 songs of 15 min (~0.7 GB each) + a 60 min marathon (~2.2 GB)
     cap_drop: [ALL]         # strangers' files go through a native decoder in here
     security_opt: ["no-new-privileges:true"]
