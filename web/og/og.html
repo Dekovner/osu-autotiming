@@ -1,0 +1,84 @@
+<!doctype html>
+<!-- Link preview card for auneu.space/timing (Discord, Telegram, ...), same series as the site's og.png.
+     Render over http with the site's fonts at /fonts (file:// can't load them):
+       mkdir -p /tmp/og && cp web/og/og.html /tmp/og/ && ln -sfn ~/auneu-site/fonts /tmp/og/fonts
+       (cd /tmp/og && python3 -m http.server 8765 &)
+       google-chrome-stable --headless=new --hide-scrollbars --window-size=1200,630 \
+         --virtual-time-budget=4000 --screenshot=web/static/og.png http://127.0.0.1:8765/og.html -->
+
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @font-face { font-family: "Unbounded"; src: url("/fonts/unbounded-latin.woff2") format("woff2"); font-weight: 400 700; }
+  @font-face { font-family: "JetBrains Mono"; src: url("/fonts/jbmono-latin.woff2") format("woff2"); font-weight: 400 500; }
+  :root { --bg: #0b0a0d; --ink: #ecebf1; --muted: #85838f; --don: #f04b3c; --kat: #4598e0; }
+  html, body { width: 1200px; height: 630px; margin: 0; overflow: hidden; }
+  body {
+    position: relative; color: var(--ink);
+    background:
+      radial-gradient(ellipse 55% 55% at 90% 0%, #f04b3c2e, transparent 70%),
+      radial-gradient(ellipse 40% 45% at 100% 20%, #4598e01f, transparent 70%),
+      var(--bg);
+  }
+  .url { position: absolute; left: 96px; top: 84px; font: 500 24px "JetBrains Mono", monospace; color: var(--muted); letter-spacing: .04em; }
+  .url b { color: var(--don); font-weight: 500; }
+  .wrap { position: absolute; left: 96px; right: 96px; bottom: 84px; }
+  h1 { margin: 0; font: 700 160px/0.9 "Unbounded", sans-serif; letter-spacing: -0.03em; }
+  .role { margin: 30px 0 0; font: 29px "JetBrains Mono", monospace; color: var(--muted); }
+  .role em { font-style: normal; color: var(--ink); }
+  .role b { font-weight: 400; color: var(--don); }
+  canvas { display: block; margin-top: 40px; width: 1008px; height: 84px;
+           border-top: 1px solid #ffffff14; border-bottom: 1px solid #ffffff14; }
+</style>
+</head>
+<body>
+  <div class="url"><b>●</b> auneu.space/timing</div>
+  <div class="wrap">
+    <h1>timing</h1>
+    <p class="role"><em><b>red lines</b> from audio</em> · BPM · offset · downbeats</p>
+    <canvas id="c" width="2016" height="168"></canvas>
+  </div>
+<script>
+// a stretch of the editor: waveform, beat grid, the red line at the left (after the fonts, for the label)
+document.fonts.ready.then(draw);
+function draw() {
+const c = document.getElementById("c"), g = c.getContext("2d"), W = c.width, H = c.height, s = 2;
+const x0 = 26 * s, beat = 56 * s, mid = H / 2;
+let seed = 7;
+const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+// waveform: a hit on every beat (bigger on the bar), softer ones on the halves, decaying noise between
+g.fillStyle = "#b9b7c4";
+for (let x = 0; x < W; x += s) {
+  const b = (x - x0) / beat;
+  const since = ((b % 1) + 1) % 1, sinceHalf = ((b * 2 % 1) + 1) % 1;
+  const onBar = Math.abs(Math.round(b) % 4) === 0;
+  let a = 0.2 + 0.8 * Math.exp(-since * 4.5) * (onBar ? 1 : 0.75) + 0.3 * Math.exp(-sinceHalf * 8);
+  if (x < x0) a = 0.06;
+  a = Math.min(1, a * (0.7 + 0.3 * rnd()));
+  const h = a * (H / 2 - 10 * s);
+  g.fillRect(x, mid - h, s, 2 * h);
+}
+// grid: bar lines white, beats grey, 1/2 red, 1/4 blue (osu!'s colours), short ticks under the waveform
+for (let k = 0; x0 + k * beat / 4 < W; k++) {
+  const x = Math.round(x0 + k * beat / 4);
+  const bar = k % 16 === 0, onBeat = k % 4 === 0, half = k % 4 === 2;
+  g.globalAlpha = bar ? 0.55 : onBeat ? 0.22 : 0.7;
+  g.fillStyle = bar || onBeat ? "#ffffff" : half ? "#f04b3c" : "#4598e0";
+  const top = bar || onBeat ? 0 : H * 0.22, bot = bar || onBeat ? H : H * 0.78;
+  g.fillRect(x - (bar ? 1.5 : 1) * s / 2, top, (bar ? 1.5 : 1) * s, bot - top);
+}
+g.globalAlpha = 1;
+// the red line: a thick red bar with its flag and label, like in the editor
+g.fillStyle = "#f04b3c";
+g.fillRect(x0 - 1.5 * s, 0, 3 * s, H);
+g.beginPath(); g.moveTo(x0 - 7 * s, 0); g.lineTo(x0 + 7 * s, 0); g.lineTo(x0, 9 * s); g.closePath(); g.fill();
+g.font = `500 ${13 * s}px "JetBrains Mono", monospace`;
+g.fillStyle = "#0b0a0d";
+g.fillRect(x0 + 5 * s, 9 * s, g.measureText("161 · 4/4").width + 6 * s, 17 * s);
+g.fillStyle = "#ecebf1";
+g.fillText("161 · 4/4", x0 + 8 * s, 22 * s);
+}
+</script>
+</body>
+</html>
