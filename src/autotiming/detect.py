@@ -811,7 +811,7 @@ def bar_allowed(o: Onsets, times: np.ndarray, phys: list[Segment], anchor: float
 
     ends = [p.time for p in phys[1:]] + [o.times[-1] + 1]
     main = int(np.argmax([e - p.time for p, e in zip(phys, ends)]))
-    syncs = []
+    syncs, spans = [], []
     for k, p in enumerate(phys):
         if k != main and not RESYNC:
             continue
@@ -841,11 +841,18 @@ def bar_allowed(o: Onsets, times: np.ndarray, phys: list[Segment], anchor: float
                 and abs(times[j + H] - times[j] - H * L) < 10]
         if len(hits):
             syncs.append(int(hits[0]))
+            spans.append((lo, int(hits[0])))
     if not syncs:
         return None
     syncs = np.unique(syncs)
     idx = np.arange(len(times))
     last = syncs[np.maximum(0, np.searchsorted(syncs, idx, side="right") - 1)]
+    # a section's beats before its own sync count from it too, not from the section before: the
+    # count carried over a short tracked bridge put a "1" a beat before the section's own (site
+    # fix 2fc1491c, 150 after 200 at 04:30: "1"s on two beats running, the line on the wrong one)
+    for lo, s in spans:
+        before = (times >= lo) & (idx < s)
+        last[before] = s
     return (idx - last) % 4 == 0
 
 
