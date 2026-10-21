@@ -19,7 +19,7 @@ let lines = [], sel = -1;          // red lines {time, beat_length, meter}, sort
 let past = [], future = [];
 let view = { start: 0, span: 8000 };
 let playing = false, playCtx0 = 0, playPos0 = 0, source = null, rate = 1, cursor = 0;
-let metroNext = 0, phaseUncertain = false, fileName = "";
+let metroNext = 0, phaseUncertain = false, fileName = "", firstRef = 0;  // firstRef: the server's first line
 let hoverT = null;  // pointer position on the waveform (osu ms), for the readout
 
 // ---------- time & grid helpers ----------
@@ -139,6 +139,12 @@ function shiftAll(beats) {
     if (j.n >= 32 && isRound(bpmOf(l))) lines[i + 1] = { ...lines[i + 1], time: Math.round(j.land) };
     else l.beat_length = (lines[i + 1].time - l.time) / j.n;
   });
+  // the first line moves by whole bars of its own grid (same timing) to stay in the bar up to
+  // the server's first line, which sat on the music's start: a shift later would leave the
+  // intro before the first line, where osu! can't map it
+  const f = lines[0], bar = f.meter * f.beat_length, top = firstRef + 30;
+  while (f.time > top) f.time = Math.round(f.time - bar);
+  while (f.time + bar <= top && (lines.length < 2 || f.time + bar < lines[1].time)) f.time = Math.round(f.time + bar);
   refresh();
 }
 
@@ -595,7 +601,7 @@ async function load(file) {
   past = []; future = [];
   lines = res.lines.map((l) => ({ time: Math.round(l.time), beat_length: l.beat_length, meter: l.meter }));
   sel = 0;
-  cursor = lines[0].time;
+  firstRef = cursor = lines[0].time;
   // a negative first line (the song opens on its downbeat) must be on screen too
   view = { start: lines[0].time < 0 ? lines[0].time - 300 : Math.max(0, lines[0].time - 1000), span: Math.min(8000, duration) };
   status(`${lines.length} red line${lines.length > 1 ? "s" : ""} in ${res.seconds.toFixed(1)} s`);

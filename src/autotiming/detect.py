@@ -694,11 +694,21 @@ LINE_COST = float(_env("LINE_COST", "30"))  # red-line compression of hybrid bea
 LINE_SIGMA_MS = float(_env("LINE_SIGMA_MS", "3"))
 
 
+# When to show the "where is 1" note, out of fold on 686 ranked maps (94.8% right,
+# bench/downbeat_exp.py cv): the trees' best minus runner-up probability under
+# DOWNBEAT_UNSURE_MARGIN, or the song's first hit on another beat with the best under
+# DOWNBEAT_FIRST_HIT_TOP (then that beat is the second guess: model right 31 of 38 times
+# it disagrees with the first hit, a coin flip under 0.9). Flags 7.9% of maps, wrong on
+# half of them: 26 of the 36 errors, the second guess right on 23 of those.
+DOWNBEAT_UNSURE_MARGIN = 0.4
+DOWNBEAT_FIRST_HIT_TOP = 0.95
+
+
 def downbeat_anchor(o: Onsets, steady: list[Segment], ch, info: dict | None = None) -> float | None:
     """A downbeat (onset clock) on the longest steady section, chosen once by harmonic change.
 
-    info, if given, gets "downbeat_margin" (best minus runner-up probability) and "downbeat_alt"
-    (the runner-up, in beats after the chosen "1")."""
+    info, if given, gets "downbeat_unsure" and "downbeat_alt" (the second guess, in beats
+    after the chosen "1")."""
     if ch is None or not steady:
         return None
     from .downbeat import downbeat_scores
@@ -707,14 +717,23 @@ def downbeat_anchor(o: Onsets, steady: list[Segment], ch, info: dict | None = No
     phys = sorted([Segment(s.time - OSU_OFFSET_MS, s.beat_length, s.meter) for s in steady], key=lambda s: s.time)
     ends = [s.time for s in phys[1:]] + [o.times[-1]]
     k = int(np.argmax([e - s.time for s, e in zip(phys, ends)]))
+    L = phys[k].beat_length
     b = grid_beats([phys[k]], max(phys[k].time, o.times[0]), ends[k])
     if len(b) < 12:
         return None
-    sc = downbeat_scores(o, ch, b[0], phys[k].beat_length, b[0], b[-1])
+    sc = downbeat_scores(o, ch, b[0], L, b[0], b[-1])
     best, second = np.argsort(-sc)[:2]
     if info is not None:
-        info["downbeat_margin"] = float(sc[best] - sc[second])
-        info["downbeat_alt"] = int((second - best) % 4)
+        alt, unsure = int(second), sc[best] - sc[second] < DOWNBEAT_UNSURE_MARGIN
+        # the beat the song's first real hit lands on (the trees' first_on_one, bar_features)
+        strong = np.flatnonzero(o.strength >= np.median(o.strength))
+        if len(strong) and b[0] - 4 * L <= o.times[strong[0]] < b[-1]:
+            x = (o.times[strong[0]] - b[0]) / L
+            first = int(np.round(x)) % 4
+            if abs(x - np.round(x)) * L < min(25.0, L / 6) and first != best and sc[best] < DOWNBEAT_FIRST_HIT_TOP:
+                alt, unsure = first, True
+        info["downbeat_unsure"] = bool(unsure)
+        info["downbeat_alt"] = int((alt - best) % 4)
     return float(b[best])
 
 
@@ -723,6 +742,7 @@ RESYNC = _env("RESYNC", "1") == "1"
 # the downbeat trees on one section alone: only when the best beat beats the runner-up by this
 # (probabilities); below it the count carried over from the previous section stays
 RESYNC_LOCAL_MARGIN = float(_env("RESYNC_LOCAL_MARGIN", "0.3"))
+SYNC_HOLD_BEATS = int(_env("SYNC_HOLD_BEATS", "3"))  # beats after a re-sync point that must stay on its grid
 
 
 def bar_allowed(o: Onsets, times: np.ndarray, phys: list[Segment], anchor: float, ch) -> np.ndarray | None:
@@ -759,7 +779,13 @@ def bar_allowed(o: Onsets, times: np.ndarray, phys: list[Segment], anchor: float
         lo = -np.inf if k == 0 or not RESYNC else p.time - L / 2
         hi = np.inf if not RESYNC else ends[k]
         d = np.abs((times - db + bar / 2) % bar - bar / 2)
+        # and the beats after it keep to this grid: a tracked ramp beat that only passes over a
+        # "1" of it (Unorthodox Red, 149.5 s, 6 bars after the anchor) is no place to count from
+        H = SYNC_HOLD_BEATS
+        on_beat = np.abs((times - db + L / 2) % L - L / 2) < 10
         hits = np.flatnonzero((times >= lo) & (times < hi) & (d < 10))
+        hits = [j for j in hits if j + H < len(times) and on_beat[j:j + H + 1].all()
+                and abs(times[j + H] - times[j] - H * L) < 10]
         if len(hits):
             syncs.append(int(hits[0]))
     if not syncs:
@@ -936,8 +962,8 @@ def detect_full(o: Onsets, pcm=None, sr=None, downbeat_ms: float | None = None, 
     the phase trees pick. The tracker runs on beat probabilities around their
     main tempo and its beats are smoothed through all onsets; combine() decides
     where they replace the steady grid. info, if given, gets "phase_keep": the
-    phase model's confidence for the main section, and the downbeat guess's margin
-    and runner-up (downbeat_anchor).
+    phase model's confidence for the main section, and whether the downbeat is in
+    doubt, with a second guess (downbeat_anchor).
     """
     from .beatprob import beat_prob
     from .track import fine_sections, track_beats
@@ -964,7 +990,7 @@ def detect_full(o: Onsets, pcm=None, sr=None, downbeat_ms: float | None = None, 
     # 3:2 last: tracker, hybrid and downbeat model all work on the straight grid they were fitted on
     segs, triplet = triplet_beats(o, segs, downbeat_ms)
     if triplet and downbeat_ms is None:  # the old downbeat is on the straight grid: guess again on the new one
-        for k in ("downbeat_margin", "downbeat_alt"):
+        for k in ("downbeat_unsure", "downbeat_alt"):
             (info or {}).pop(k, None)
         anchor = downbeat_anchor(o, segs, ch, info)
     if info is not None:
@@ -1134,7 +1160,9 @@ def first_on_downbeat(segs: list[Segment], anchor: float | None, ch, o: Onsets) 
     if a is not None and on_grid(a) and (end is None or a < end + bar):
         first = a  # the song's anchor downbeat lies on the first section's grid
     elif ch is not None and end is not None:
-        b = grid_beats([s0], s0.time, end)
+        # from the first sound, like downbeat_anchor(): the trees never saw a window opening on
+        # silence, and guessed a beat off from 25 ms on Unorthodox Red (0.98 right from 843 ms)
+        b = grid_beats([s0], max(s0.time, o.times[0] + OSU_OFFSET_MS), end)
         if len(b) < 12:
             return segs
         bp = b - OSU_OFFSET_MS  # the audio's own clock, like onsets and chroma
@@ -1335,14 +1363,8 @@ class Timing:
     segments: list[Segment]  # red lines in osu! time
     phase_uncertain: bool = False  # kick rule and phase model disagree: check the "and" too
     alt_segments: list[Segment] | None = None  # the same timing shifted by half a beat
-    downbeat_uncertain: bool = False  # the downbeat trees hardly prefer their "1" over the runner-up
-    downbeat_alt: int | None = None  # the runner-up "1", in beats after the chosen one (1..3)
-
-
-# Downbeat trees' best minus runner-up probability below this gets the "where is 1" note.
-# Out-of-fold on 686 ranked maps (94.8% right, bench/downbeat_exp.py cv): flags 6% of maps,
-# wrong on half of them, 22 of 36 errors; the runner-up is the mapper's "1" on 30 of 36.
-DOWNBEAT_UNSURE_MARGIN = 0.4
+    downbeat_uncertain: bool = False  # "1" in doubt (downbeat_anchor): show the second guess
+    downbeat_alt: int | None = None  # the second guess at "1", in beats after the chosen one (1..3)
 
 
 def analyze(path, downbeat_ms: float | None = None, decoded: tuple[np.ndarray, int] | None = None) -> Timing:
@@ -1356,9 +1378,7 @@ def analyze(path, downbeat_ms: float | None = None, decoded: tuple[np.ndarray, i
     info = {}
     segs = detect_full(o, pcm, sr, downbeat_ms, info)
     alt = [Segment(s.time + s.beat_length / 2, s.beat_length, s.meter) for s in segs]
-    margin = info.get("downbeat_margin")
-    bars = dict(downbeat_uncertain=margin is not None and margin < DOWNBEAT_UNSURE_MARGIN,
-                downbeat_alt=info.get("downbeat_alt"))
+    bars = dict(downbeat_uncertain=info.get("downbeat_unsure", False), downbeat_alt=info.get("downbeat_alt"))
     if info.get("phase_keep") is not None:
         p = info["phase_keep"]
         return Timing(segs, phase_uncertain=PHASE_UNSURE[0] < p < PHASE_UNSURE[1], alt_segments=alt, **bars)
