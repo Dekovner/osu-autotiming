@@ -453,11 +453,13 @@ function b64(s, Type) {
   return out;
 }
 
-function status(msg, err = false) {
+// busy: the server is still on it (queue or analysis), shown with the drifting dots
+function status(msg, err = false, busy = false) {
   const p = $("status");
   p.hidden = !msg;
-  p.textContent = msg || "";
+  p.querySelector(".msg").textContent = msg || "";
   p.classList.toggle("err", err);
+  p.classList.toggle("busy", busy && !err);
 }
 
 // upload, then ask once a second where the song is: in the queue, being analysed, or done
@@ -468,9 +470,9 @@ async function analyseOnServer(form, name) {
   while (!job.error && job.status !== "done") {
     if (job.status === "queued") {
       status(job.ahead > 0 ? `in the queue: ${job.ahead} song${job.ahead > 1 ? "s" : ""} ahead of yours`
-        : `you're next (${job.running} song${job.running === 1 ? "" : "s"} being analysed)`);
+        : `you're next (${job.running} song${job.running === 1 ? "" : "s"} being analysed)`, false, true);
     } else {
-      status(`analysing ${name}… (a few seconds per minute of audio)`);
+      status(`analysing ${name}… (a few seconds per minute of audio)`, false, true);
     }
     await new Promise((r) => setTimeout(r, 1000));
     job = await asJson(await fetch(`api/job/${id}`));
@@ -490,7 +492,7 @@ async function load(file) {
   }
   fileName = file.name;
   pause();
-  status(`analysing ${file.name}… (a few seconds per minute of audio)`);
+  status(`uploading ${file.name}…`, false, true);
   $("drop").querySelector(".drop-name").textContent = file.name;
   const form = new FormData();
   form.append("file", file);

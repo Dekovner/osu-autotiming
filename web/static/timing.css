@@ -52,8 +52,26 @@ body {
 .drop-name { font: 500 1.05rem var(--display); }
 .drop-meta { font-size: 0.75rem; color: var(--muted); }
 .drop-row:hover .drop-name, .drop.over .drop-name { color: var(--don); }
-.status { margin: 0; padding: 0 2px 16px; font-size: 0.8rem; color: var(--muted); }
+.heads-up { margin: 0; padding: 0 2px 14px; font-size: 0.72rem; line-height: 1.55; color: var(--muted); opacity: .8; }
+.heads-up b { margin-right: 6px; color: var(--don); font-weight: 500; }
+.status { display: flex; align-items: center; gap: 12px; margin: 0; padding: 0 2px 16px; font-size: 0.8rem; color: var(--muted); }
 .status.err { color: var(--don); }
+
+/* while the server works: a row of dots floating left and right, don and kat in turn,
+   each a little behind the one before, so the row sways like a wave */
+.dots { display: none; position: relative; flex: 0 0 auto; width: 66px; height: 8px; }
+.status.busy .dots { display: block; }
+.dots i {
+  position: absolute; top: 1px; left: 0; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--don); animation: drift 1.4s cubic-bezier(.45, 0, .55, 1) infinite alternate;
+}
+.dots i:nth-child(even) { background: var(--kat); }
+.dots i:nth-child(2) { left: 9px; animation-delay: -0.1s; }
+.dots i:nth-child(3) { left: 18px; animation-delay: -0.2s; }
+.dots i:nth-child(4) { left: 27px; animation-delay: -0.3s; }
+.dots i:nth-child(5) { left: 36px; animation-delay: -0.4s; }
+@keyframes drift { from { transform: translateX(0); opacity: .45; } 50% { opacity: 1; } to { transform: translateX(24px); opacity: .45; } }
+@media (prefers-reduced-motion: reduce) { .dots i { animation: none; } }
 
 button, select, input { font: inherit; color: inherit; }
 button {
