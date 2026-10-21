@@ -378,7 +378,60 @@ def _detect_raw(o: Onsets) -> list[Segment]:
         if hi < lo:
             lo, hi = hi, lo
         out.append(Segment(_boundary(t, w, a, b, lo - WIN_HOP_MS, hi + WIN_HOP_MS), b.beat_length))
-    return prune_segments(t, w, wl, out, Segment(phi, L))
+    return polyrhythm_boundaries(o, prune_segments(t, w, wl, out, Segment(phi, L)))
+
+
+# Neighbouring sections at 3:4 or 2:3 tempo whose grids interlock (ARCADEA, 2581097: 268 then 201,
+# both on one 74.6 ms tick) can be the same music in two notations: the old tempo with triplets or
+# the new one straight. The change shows where the onsets turn from the old grid's own beats to
+# the new one's, not where the triplets start: the mapper's 201 begins 28 s after ours did, where
+# the beats only 201 has take over (03:16). Each pair's boundary moves to the best split of
+# log(old-only / new-only beat mass) per POLY_WIN_MS, if the old grid wins by POLY_MIN_GAIN before
+# it and loses by as much after it (a song in triplets throughout keeps its boundary). On 763
+# ranked maps it moves one more boundary of 67 such pairs, to 0.8 s of the mapper's (was 27 s).
+POLY_RATIOS = ((3, 4), (4, 3), (2, 3), (3, 2))
+POLY_WIN_MS, POLY_MIN_GAIN = 2000.0, float(os.environ.get("POLY_MIN_GAIN", "3.0"))
+
+
+def interlock(A: Segment, B: Segment) -> tuple[int, int, float] | None:
+    """(p, q, tick) when A's and B's tempos are p:q in POLY_RATIOS (A's beat p ticks, B's q) and
+    B's grid lies on A's ticks."""
+    pq = next(((p, q) for p, q in POLY_RATIOS if abs(np.log(A.beat_length / B.beat_length * q / p)) < 0.003), None)
+    if pq is None:
+        return None
+    tick = A.beat_length / pq[0]
+    d = (B.time - A.time) / tick
+    return (*pq, tick) if abs(d - round(d)) * tick <= 8 else None
+
+
+def polyrhythm_boundaries(o: Onsets, segs: list[Segment]) -> list[Segment]:
+    out = list(segs)
+    for j in range(len(out) - 1):
+        A, B = out[j], out[j + 1]
+        if (lock := interlock(A, B)) is None:
+            continue
+        p, q, tick = lock
+        dB = (B.time - A.time) / tick
+        end = out[j + 2].time if j + 2 < len(out) else o.times[-1]
+        sel = (o.times >= B.time) & (o.times < end)
+        t, s = o.times[sel], o.strength[sel]
+        x = (t - A.time) / tick
+        k = np.round(x).astype(int)
+        on = np.abs(x - k) * tick < 12
+        a_beat, b_beat = on & (k % p == 0), on & ((k - round(dB)) % q == 0)
+        eps = np.median(o.strength)
+        edges = np.arange(B.time, end, POLY_WIN_MS)
+        win = [(t >= w0) & (t < w0 + POLY_WIN_MS) for w0 in edges]
+        a = np.array([np.log((s[m & a_beat & ~b_beat].sum() + eps) / (s[m & b_beat & ~a_beat].sum() + eps)) for m in win])
+        if len(a) < 3:
+            continue
+        pre = np.cumsum(a)
+        i = int(np.argmax(pre))
+        if pre[i] < POLY_MIN_GAIN or i >= len(a) - 2 or pre[-1] - pre[i] > -POLY_MIN_GAIN:
+            continue
+        n = np.ceil((edges[i] + POLY_WIN_MS - B.time) / B.beat_length)
+        out[j + 1] = Segment(float(B.time + n * B.beat_length), B.beat_length, B.meter)
+    return out
 
 
 def piecewise_excess(t, w, segs: list[Segment], subdiv=4, tol=8.0) -> float:
@@ -855,7 +908,9 @@ def combine(o: Onsets, steady: list[Segment], tracked, anchor: float | None = No
     if tracked is None or len(tracked.times) < 4:
         return steady
     phys = sorted([Segment(s.time - OSU_OFFSET_MS, s.beat_length, s.meter) for s in steady], key=lambda s: s.time)
-    merged = hybrid(o, phys, tracked)
+    # a section before an interlocking 3:4 / 2:3 neighbour may be in triplets: compare on thirds there
+    thirds = [(a.time, b.time) for a, b in zip(phys, phys[1:]) if interlock(a, b)]
+    merged = hybrid(o, phys, tracked, thirds=thirds)
     if merged.tracked_share <= TRACK_MIN_SHARE:  # a steady song: keep its lines exactly
         return steady
     allowed = None

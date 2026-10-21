@@ -321,11 +321,14 @@ RUN_PHASE_SHARE = float(_env("RUN_PHASE_SHARE", "0.75"))
 RUN_PHASE_MIN_DEV = float(_env("RUN_PHASE_MIN_DEV", "0.1"))
 
 
-def _quarters(beat_times: np.ndarray) -> np.ndarray:
-    """Beat and 1/4, 1/2, 3/4 positions between consecutive beats."""
+def _quarters(beat_times: np.ndarray, fracs=(0, 0.25, 0.5, 0.75)) -> np.ndarray:
+    """Beat and 1/4, 1/2, 3/4 positions between consecutive beats (or other fractions of a beat)."""
     a, b = beat_times[:-1], beat_times[1:]
-    q = a[:, None] + (b - a)[:, None] * np.array([0, 0.25, 0.5, 0.75])[None, :]
+    q = a[:, None] + (b - a)[:, None] * np.array(fracs)[None, :]
     return np.concatenate([q.ravel(), beat_times[-1:]])
+
+
+THIRDS = (0, 1 / 4, 1 / 3, 1 / 2, 2 / 3, 3 / 4)
 
 
 def _on_grid(t: np.ndarray, grid: np.ndarray, tol: float) -> np.ndarray:
@@ -348,7 +351,7 @@ def _runs(mask: np.ndarray, min_run: int) -> np.ndarray:
     return out
 
 
-def hybrid(o, steady: list[Segment], tracked: Beats, margin=HYBRID_MARGIN) -> Beats:
+def hybrid(o, steady: list[Segment], tracked: Beats, margin=HYBRID_MARGIN, thirds=()) -> Beats:
     """Steady beats where a steady grid explains the onsets, tracked beats where it can't.
 
     The steady detector's phase is consistent over the whole song, the tracker's
@@ -356,6 +359,10 @@ def hybrid(o, steady: list[Segment], tracked: Beats, margin=HYBRID_MARGIN) -> Be
     makes a half-beat slide neither help nor hurt the tracker; where it does win
     (rubato, drift, short tempo changes), its beats are used, moved back to the
     steady phase if the run starts on the "and".
+
+    thirds: (start, end) spans compared on thirds of a beat as well: a section in triplets
+    against a neighbour at 3:4 or 2:3 tempo (detect.polyrhythm_boundaries), where the tracker
+    would otherwise win at the other tempo just because its quarters are this one's thirds.
     """
     from .detect import weights
     from .grid import beats as grid_beats
@@ -370,6 +377,10 @@ def hybrid(o, steady: list[Segment], tracked: Beats, margin=HYBRID_MARGIN) -> Be
     q_s = _quarters(sb)
     on_s = _on_grid(t, q_s, HYBRID_TOL_MS)
     on_t = _on_grid(t, _quarters(tracked.times), HYBRID_TOL_MS)
+    for a, b in thirds:
+        m = (t >= a) & (t < b)
+        on_s[m] = _on_grid(t[m], _quarters(sb, THIRDS), HYBRID_TOL_MS)
+        on_t[m] = _on_grid(t[m], _quarters(tracked.times, THIRDS), HYBRID_TOL_MS)
     cw = np.cumsum(np.r_[0, w])
     cs, ct = np.cumsum(np.r_[0, w * on_s]), np.cumsum(np.r_[0, w * on_t])
     L = np.diff(sb, append=sb[-1] + (sb[-1] - sb[-2]))
