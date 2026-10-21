@@ -592,8 +592,9 @@ def choose_octave(o: Onsets, segs: list[Segment], info: dict | None = None) -> l
     decide on their own, with a cost for straying from the main tempo: a slow
     middle section at 150 in a 200 BPM song would otherwise come out as 300
     (the double grid always fits the onsets as well), yet genuine jumps like
-    154 -> 250 must survive. info, if given, gets "octave_alts": the main section (whole song) and
-    long sections whose octave is in doubt, with the runner-up as a factor of the chosen tempo.
+    154 -> 250 must survive. info, if given, gets "octave_doubt": the main section (span None: the
+    song but the sections that chose on their own, "own") and long sections whose octave is in doubt,
+    with the runner-up as a factor of the chosen tempo (osu! time, octave_lines() maps them to red lines).
     """
     ends = [segs[i + 1].time if i + 1 < len(segs) else o.times[-1] + 1 for i in range(len(segs))]
     main = max(range(len(segs)), key=lambda i: ends[i] - segs[i].time)
@@ -608,14 +609,14 @@ def choose_octave(o: Onsets, segs: list[Segment], info: dict | None = None) -> l
     s_main, c_main = scored(main)
     f_main = max(s_main, key=s_main.get)
     main_bpm = segs[main].bpm * f_main
-    alts = []
+    alts, own = [], []
 
-    def doubt(sc, f, lo, hi):
+    def doubt(sc, f, span):
         alt = max((k for k in sc if k / f in (0.5, 2.0)), key=sc.get)
         if sc[f] - sc[alt] < OCT_UNSURE_MARGIN:
-            alts.append({"from": lo, "to": hi, "factor": alt / f})
+            alts.append({"span": span, "factor": alt / f})
 
-    doubt(s_main, f_main, None, None)
+    doubt(s_main, f_main, None)
     out = []
     for i, s in enumerate(segs):
         if i == main:
@@ -623,7 +624,8 @@ def choose_octave(o: Onsets, segs: list[Segment], info: dict | None = None) -> l
         elif OCT_PER_SECTION and (ends[i] - s.time) / s.beat_length >= OCT_SECTION_MIN_BEATS:
             sc, cands = scored(i)
             f = max(sc, key=lambda k: sc[k] - OCT_CONT_LAMBDA * abs(np.log2(s.bpm * k / main_bpm)))
-            doubt(sc, f, s.time + OSU_OFFSET_MS, ends[i] + OSU_OFFSET_MS if i + 1 < len(segs) else None)
+            own.append((s.time + OSU_OFFSET_MS, ends[i] + OSU_OFFSET_MS))
+            doubt(sc, f, own[-1])
         else:
             f, cands = f_main, None
         if f == 1.0:
@@ -640,7 +642,26 @@ def choose_octave(o: Onsets, segs: list[Segment], info: dict | None = None) -> l
                 phi = beat_phase(o.times[sel], wl[sel], w[sel], s.time, L, subdiv=2) if sel.any() else s.time
             out.append(Segment(phi if i == 0 else s.time + ((phi - s.time) % L), L, s.meter))
     if info is not None:
-        info["octave_alts"] = alts
+        info["octave_doubt"] = {"alts": alts, "own": own}
+    return out
+
+
+def octave_lines(segs: list[Segment], doubt: dict | None, t_end: float) -> list[dict]:
+    """choose_octave's doubts on the final red lines: {"lines": indices, "factor"}. A line belongs to
+    a section if most of its own span lies inside it (later steps move lines by up to a beat); the
+    main section's doubt covers every line not mostly inside a section that chose its octave itself."""
+    if not doubt or not segs:
+        return []
+    ext = [(s.time, segs[i + 1].time if i + 1 < len(segs) else max(t_end, s.time + 1)) for i, s in enumerate(segs)]
+    inside = lambda i, lo, hi: max(0.0, min(hi, ext[i][1]) - max(lo, ext[i][0])) > 0.5 * (ext[i][1] - ext[i][0])
+    out = []
+    for a in doubt["alts"]:
+        if a["span"] is None:
+            idx = [i for i in range(len(segs)) if not any(inside(i, *sp) for sp in doubt["own"])]
+        else:
+            idx = [i for i in range(len(segs)) if inside(i, *a["span"])]
+        if idx:
+            out.append({"lines": idx, "factor": a["factor"]})
     return out
 
 
@@ -1068,15 +1089,21 @@ def detect_full(o: Onsets, pcm=None, sr=None, downbeat_ms: float | None = None, 
     # 3:2 last: tracker, hybrid and downbeat model all work on the straight grid they were fitted on
     segs, triplet = triplet_beats(o, segs, downbeat_ms)
     if triplet and downbeat_ms is None:  # the old downbeat is on the straight grid: guess again on the new one
-        for k in ("downbeat_unsure", "downbeat_alt", "octave_alts"):  # the octaves were for the straight grid too
+        for k in ("downbeat_unsure", "downbeat_alt"):
             (info or {}).pop(k, None)
         anchor = downbeat_anchor(o, segs, ch, info)
     if info is not None:
         info["triplet"] = triplet
+        if triplet:  # the octave doubts were about the straight grid
+            info.pop("octave_doubt", None)
     if plain and STEADY_DOWNBEATS:
         segs = steady_downbeats(o, segs, anchor, ch)
     segs = connect_lines(snap_bpm(first_on_downbeat(segs, anchor, ch, o), o.times[-1] + OSU_OFFSET_MS))
-    return refine_junk(o, pcm, sr, segs) if refine and REFINE_JUNK and pcm is not None else segs
+    if refine and REFINE_JUNK and pcm is not None:
+        segs = refine_junk(o, pcm, sr, segs)
+    if info is not None:
+        info["octave_alts"] = octave_lines(segs, info.pop("octave_doubt", None), o.times[-1] + OSU_OFFSET_MS)
+    return segs
 
 
 # A section shorter than the ~10 s tempo windows can come out as a run of lines a bar or two
@@ -1504,7 +1531,7 @@ class Timing:
     alt_segments: list[Segment] | None = None  # the same timing shifted by half a beat
     downbeat_uncertain: bool = False  # "1" in doubt (downbeat_anchor): show the second guess
     downbeat_alt: int | None = None  # the second guess at "1", in beats after the chosen one (1..3)
-    octave_alts: list[dict] | None = None  # {"from", "to" (osu ms, None: song edge), "factor"}: x2 / x0.5 in doubt
+    octave_alts: list[dict] | None = None  # {"lines": indices into segments, "factor"}: x2 / x0.5 in doubt
 
 
 def analyze(path, downbeat_ms: float | None = None, decoded: tuple[np.ndarray, int] | None = None) -> Timing:

@@ -54,10 +54,11 @@ def main():
     rows = [json.loads(x) for x in open(RESULTS / f"{a.dataset}_{a.tag}.jsonl")]
     spans = {it["id"]: it["span"] for it in DATASETS[a.dataset]()}
     rows = [r for r in rows if (ids is None or r["id"] in ids) and r["id"] in spans]
-    total, kinds, bad = Counter(), Counter(), []
+    total, kinds, bad, skipped = Counter(), Counter(), [], 0
     for r in rows:
         c = classify(r, spans[r["id"]])
-        if c is None:
+        if c is None:  # no prediction (detector failed) or no mapped span
+            skipped += 1
             continue
         c, n = c
         for k, v in c.items():
@@ -72,8 +73,9 @@ def main():
             bad.append((r["id"], f"part {worst}", {k: round(v / n, 2) for k, v in c.most_common(3)}))
         else:
             kinds["ok"] += 1
-    n = len(rows)
-    print(f"{n} maps; mean share of time:", {k: f"{100 * v / n:.1f}%" for k, v in total.most_common()})
+    n = len(rows) - skipped
+    print(f"{n} maps ({skipped} without a prediction left out); mean share of time:",
+          {k: f"{100 * v / n:.1f}%" for k, v in total.most_common()})
     print("maps:", dict(kinds.most_common()))
     if a.list:
         for b in sorted(bad, key=lambda x: x[1]):

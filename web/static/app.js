@@ -129,11 +129,13 @@ function edit(fn) {
 // it and the next line moves onto its grid; otherwise the earlier line's BPM absorbs the gap
 const SHIFT_JOINT_MAX = 30;  // ms: a joint the shift opened wider than this was no joint (e.g. a x2 jump)
 const isRound = (bpm) => [1, 0.5, 0.25, 0.1].some((s) => Math.abs(bpm / s - Math.round(bpm / s)) < 1e-6);
-function shiftAll(beats) {
+// served: beats of the server's tempo (the "1" runner-up), even after a line's octave was changed (octK)
+function shiftAll(beats, served = false) {
   if (!lines.length) return;
   commit();
   const clean = lines.map((_, i) => { const j = joint(i); return j !== null && Math.abs(j.off) < 0.5; });
-  lines = lines.map((l) => ({ ...l, time: Math.round(l.time + beats * l.beat_length) }));  // order kept: sel stays
+  const step = (l) => beats * l.beat_length * (served ? l.octK || 1 : 1);
+  lines = lines.map((l) => ({ ...l, time: Math.round(l.time + step(l)) }));  // order kept: sel stays
   lines.forEach((l, i) => {
     const j = joint(i);
     if (!clean[i] || Math.abs(j.off) < 0.5 || Math.abs(j.off) > SHIFT_JOINT_MAX) return;
@@ -149,14 +151,29 @@ function shiftAll(beats) {
   refresh();
 }
 
-// a tempo in doubt (the server's octave_alts): the whole song (from/to null) or one section,
-// whose red lines all take the runner-up tempo at once (x2 / x0.5), times kept
-const inSpan = (a, l) => (a.from == null || l.time >= a.from - 5) && (a.to == null || l.time < a.to - 5);
-function scaleSpan(a) {
-  if (!lines.some((l) => inSpan(a, l))) return;
+// a tempo in doubt (the server's octave_alts[k]): its red lines are tagged with k when the result
+// loads (times move with every edit, the tag moves with the line; pasted lines have none) and all
+// take the runner-up tempo at once. Halving keeps each line's time, its beat stays "1"; a line an
+// odd number of old beats after the previous halved one would sit mid-beat on its grid (a double
+// barline, and its own grid on 2 and 4), so it moves one old beat later, onto that grid.
+// false if no tagged line is left
+function scaleOctave(k, factor) {
+  const idx = lines.flatMap((l, i) => ((l.oct || []).includes(k) ? [i] : []));
+  if (!idx.length) return false;
   commit();
-  lines = lines.map((l) => (inSpan(a, l) ? { ...l, beat_length: l.beat_length / a.factor } : l));
+  const next = lines.map((l) => ({ ...l }));
+  idx.forEach((i, n) => {
+    const l = next[i];
+    l.beat_length /= factor;
+    l.octK = (l.octK || 1) * factor;
+    if (factor >= 1 || n === 0 || idx[n - 1] !== i - 1) return;
+    const p = next[i - 1], beats = (l.time - p.time) / p.beat_length;
+    const later = Math.round(l.time + p.beat_length / 2);
+    if (Math.abs(beats - Math.floor(beats) - 0.5) < 0.25 && (i + 1 >= next.length || later < next[i + 1].time)) l.time = later;
+  });
+  lines = next;
   refresh();
+  return true;
 }
 
 function addLineAt(t, e = null) {
@@ -638,15 +655,18 @@ function showNotes(res) {
     notes.push(`<b>not sure where "1" is</b>: play it, the high click of the metronome is "1". ` +
       `If it isn't the start of the bar, <button id="db-alt">try "1" ${way}</button> (the second guess), or all −1 / all +1 above the red lines.`);
   }
-  const octs = (res.octave_alts || []).filter((a) => lines.some((l) => inSpan(a, l)));
+  // lines are still the server's here: tag each doubtful tempo's red lines (see scaleOctave)
+  const octs = (res.octave_alts || []).filter((a) => a.lines.some((i) => lines[i]));
+  octs.forEach((a, k) => a.lines.forEach((i) => { if (lines[i]) lines[i].oct = [...(lines[i].oct || []), k]; }));
   octs.forEach((a, k) => {
-    const hit = lines.filter((l) => inSpan(a, l));
-    const span = (l) => { const i = lines.indexOf(l); return (i + 1 < lines.length ? lines[i + 1].time : duration) - l.time; };
-    const main = hit.reduce((x, y) => (span(y) > span(x) ? y : x));
-    const where = a.from == null ? "the tempo" : `${fmtClock(a.from)}${a.to == null ? " to the end" : `–${fmtClock(a.to)}`}`;
+    const idx = a.lines.filter((i) => lines[i]);
+    const end = (i) => (i + 1 < lines.length ? lines[i + 1].time : duration);
+    const main = lines[idx.reduce((x, y) => (end(y) - lines[y].time > end(x) - lines[x].time ? y : x))];
+    const all = idx.length === lines.length, together = idx.every((i, n) => n === 0 || i === idx[n - 1] + 1);
+    const where = all ? "the tempo" : together ? `${fmtClock(lines[idx[0]].time)}–${fmtClock(end(idx[idx.length - 1]))}` : "the main tempo";
     notes.push(`<b>${where} could be ${fmtBpm(bpmOf(main) * a.factor)} BPM, not ${fmtBpm(bpmOf(main))}</b>: ` +
       `mappers pick either for songs like this. <button class="oct-alt" data-k="${k}">try ×${a.factor === 2 ? "2" : "½"}` +
-      `${a.from == null ? " everywhere" : " there"}</button>`);
+      `${all ? " everywhere" : " there"}</button>`);
   });
   if (phaseUncertain) notes.push("<b>beat phase uncertain</b>: if the grid feels on the offbeat, press all −½ (or all +½) above the red lines.");
   if (!notes.length) notes.push("red lines sit on guessed downbeats (the high click): if \"1\" is elsewhere, press all −1 / all +1 above the red lines.");
@@ -655,12 +675,12 @@ function showNotes(res) {
   box.classList.toggle("unsure", !!(res.downbeat_uncertain && beats) || phaseUncertain || octs.length > 0);
   box.hidden = false;
   box.querySelectorAll(".oct-alt").forEach((b) => (b.onclick = () => {
-    scaleSpan(octs[+b.dataset.k]);
+    const k = +b.dataset.k, done = scaleOctave(k, octs[k].factor);
     b.disabled = true;
-    b.textContent = "done (ctrl+z undoes it)";
+    b.textContent = done ? "done (ctrl+z undoes it)" : "those red lines are gone";
   }));
   const b = $("db-alt");
-  if (b) b.onclick = () => { shiftAll(beats); b.disabled = true; b.textContent = "moved (ctrl+z undoes it)"; };
+  if (b) b.onclick = () => { shiftAll(beats, true); b.disabled = true; b.textContent = "moved (ctrl+z undoes it)"; };
 }
 
 // ---------- wiring ----------
@@ -726,6 +746,8 @@ function pasteTiming(text) {
   sel = 0;
   setLines(got, false);
   firstRef = got[0].time;
+  // the notes' buttons are about the analysis, not this timing
+  $("notes").querySelectorAll("button").forEach((b) => (b.disabled = true));
   status(`pasted ${got.length} red line${got.length > 1 ? "s" : ""} (ctrl+z undoes it)`);
 }
 $("paste").onclick = async () => {
