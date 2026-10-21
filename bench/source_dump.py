@@ -26,24 +26,31 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from run import DATASETS, background  # noqa: E402
 
-DUMP = Path(__file__).resolve().parents[1] / "data" / "source_dump"
+DUMP = Path(os.environ.get("SOURCE_DUMP", Path(__file__).resolve().parents[1] / "data" / "source_dump"))
 
 
 def crossfit(path):
     from autotiming import detect as D
 
-    for env, name, attr in (("OCTAVE_CROSSFIT", "octave", "OCTAVE_TREES"), ("PHASE_CROSSFIT", "phase", "PHASE_TREES")):
+    for env, name, attr in (("OCTAVE_CROSSFIT", "octave", "OCTAVE_TREES"), ("PHASE_CROSSFIT", "phase", "PHASE_TREES"),
+                            ("SECPHASE_CROSSFIT", "secphase", "SECPHASE_TREES")):
         if os.environ.get(env) == "1":
             cf = Path(os.environ.get(f"{env}_DIR") or DUMP.parent / f"{name}_crossfit")
             fold = json.loads((cf / "assign.json").read_text()).get(hashlib.md5(Path(path).read_bytes()).hexdigest())
             setattr(D, attr, cf / f"fold{fold}.npz" if fold is not None else Path(D.__file__).resolve().parent / "models" / f"{name}_trees.npz")
+    if os.environ.get("RUN_CROSSFIT") == "1":
+        from autotiming import track as T
+
+        cf = Path(os.environ["RUN_CROSSFIT_DIR"])
+        fold = json.loads((cf / "assign.json").read_text()).get(hashlib.md5(Path(path).read_bytes()).hexdigest(), 0)
+        T.RUN_TREES = cf / f"fold{fold}.npz"
 
 
 def stages(path):
     from autotiming import detect as D
     from autotiming.beatprob import beat_prob
     from autotiming.downbeat import harmony
-    from autotiming.track import fine_sections, hybrid, track_beats
+    from autotiming.track import fine_sections, hybrid, lines, track_beats
     from cache_onsets import exact_onsets
 
     crossfit(path)
@@ -63,6 +70,10 @@ def stages(path):
         out["tracked"] = tracked.times + D.OSU_OFFSET_MS
         out["merged"] = merged.times + D.OSU_OFFSET_MS
         out["merged_share"] = np.array(merged.tracked_share)
+        # the merged beats as red lines, before combine's gates, and what combine keeps
+        raw = sorted(lines(o, merged, line_cost=D.LINE_COST, sigma_ms=D.LINE_SIGMA_MS), key=lambda s: s.time)
+        out["lines"] = np.array([[s.time + D.OSU_OFFSET_MS, s.beat_length] for s in raw])
+        out["combined"] = np.array([[s.time, s.beat_length] for s in D.combine(o, steady, tracked, None, ch)])
     final = D.detect_full(o, pcm, sr)
     out["final"] = np.array([[s.time, s.beat_length] for s in final])
     return out

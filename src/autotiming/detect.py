@@ -1152,6 +1152,8 @@ def detect_full(o: Onsets, pcm=None, sr=None, downbeat_ms: float | None = None, 
     segs = connect_lines(snap_bpm(first_on_downbeat(segs, anchor, ch, o), o.times[-1] + OSU_OFFSET_MS))
     if refine and REFINE_JUNK and pcm is not None:
         segs = refine_junk(o, pcm, sr, segs)
+    if refine and ch is not None:
+        segs = section_phase(o, pcm, sr, ch.chroma, segs)
     if info is not None:
         info["octave_alts"] = octave_lines(segs, info.pop("octave_doubt", None), o.times[-1] + OSU_OFFSET_MS)
     return segs
@@ -1573,6 +1575,77 @@ def phase_keep_prob(f: dict) -> float | None:
     x = np.array([[f[k] for k in m["names"]]])
     p = predict_proba(m, np.nan_to_num(np.concatenate([x, -x])))
     return float((p[0] + 1 - p[1]) / 2)
+
+
+# Section phase trees (bench/secphase_exp.py): after everything else, each section of the final
+# lines may move by half a beat. steady_phase decides only steady sections of 32+ beats (shorter
+# ones follow the main section), and lines made from tracked beats, refine_junk's re-detections
+# and the bar logic never meet the phase model at all; a perfect choice per final section would
+# make 114 -> 122 ranked few-line maps right as they are (242 -> 253 heavy ones).
+SECPHASE_TREES = Path(_env("SECPHASE_TREES", Path(__file__).resolve().parent / "models" / "secphase_trees.npz"))
+SECPHASE_THR = float(_env("SECPHASE_THR", "0.6"))
+SECPHASE_MIN_BEATS = 4
+
+
+def section_phase_features(o: Onsets, pcm, sr, ch, segs: list[Segment]) -> dict:
+    """{index: features} for each final section of SECPHASE_MIN_BEATS+ beats (osu! clock lines)."""
+    st = sorted(segs, key=lambda s: s.time)
+    end = o.times[-1] + OSU_OFFSET_MS
+    ends = [s.time for s in st[1:]] + [end]
+    lens = [(e - max(s.time, o.times[0] + OSU_OFFSET_MS)) / s.beat_length for s, e in zip(st, ends)]
+    main = int(np.argmax([e - s.time for s, e in zip(st, ends)]))
+    out = {}
+    probs = {}
+    for i, s in enumerate(st):
+        if lens[i] < SECPHASE_MIN_BEATS:
+            continue
+        phi, L = s.time - OSU_OFFSET_MS, s.beat_length
+        lo = phi if i > 0 else o.times[0]
+        hi = ends[i] - OSU_OFFSET_MS
+        f = phase_features(o, pcm, sr, ch, phi, L, lo, hi)
+        p = phase_keep_prob(f)
+        probs[i] = 0.5 if p is None else p
+        f["phase_p"] = probs[i]
+        f["sec_beats"] = float(lens[i])
+        f["sec_s"] = float((hi - lo) / 1000)
+        f["is_main"] = float(i == main)
+        f["log_ratio_main"] = float(np.log(L / st[main].beat_length))
+        f["n_secs"] = float(len(st))
+        f["pos"] = float((s.time - st[0].time) / max(1.0, end - st[0].time))
+
+        def rel(ref):  # where this line sits on a same-tempo grid: 0 on its beats, 0.5 on its "and"
+            if abs(np.log(L / ref.beat_length)) > 0.002:
+                return -1.0
+            x = ((s.time - ref.time) / ref.beat_length) % 1.0
+            return float(min(x, 1 - x))
+
+        f["rel_prev"] = rel(st[i - 1]) if i > 0 else -1.0
+        f["rel_main"] = rel(st[main]) if i != main else 0.0
+        out[i] = f
+    for i, f in out.items():
+        f["main_phase_p"] = probs.get(main, 0.5)
+    return out
+
+
+def section_phase(o: Onsets, pcm, sr, ch, segs: list[Segment]) -> list[Segment]:
+    if pcm is None or not SECPHASE_TREES.exists() or _env("SECPHASE", "1") != "1":
+        return segs
+    from .beatprob import load_model, predict_proba
+
+    st = sorted(segs, key=lambda s: s.time)
+    if len(st) < 2:  # one line: its phase is steady_phase's main decision, which the trees only made worse
+        return segs
+    m = load_model(SECPHASE_TREES)
+    feats = section_phase_features(o, pcm, sr, ch, st)
+    if not feats:
+        return segs
+    idx = sorted(feats)
+    X = np.nan_to_num(np.array([[feats[i][str(n)] for n in m["names"]] for i in idx], float))
+    flip = {i for i, p in zip(idx, predict_proba(m, X)) if p >= SECPHASE_THR}
+    if not flip:
+        return segs
+    return connect_lines([Segment(s.time + s.beat_length / 2, s.beat_length, s.meter) if i in flip else s
+                          for i, s in enumerate(st)])
 
 
 @dataclass

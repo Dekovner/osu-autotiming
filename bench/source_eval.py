@@ -58,11 +58,13 @@ def main():
         tb = beats(tf, s, e)
         if len(tb) < 2:
             continue
-        src = {"steady": grid(z["steady"], s - 5000, e + 5000), "final": grid(z["final"], s - 5000, e + 5000)}
+        src = {k: grid(z[k], s - 5000, e + 5000) for k in ("steady", "final", "lines", "combined") if k in z}
         if "tracked" in z:
             src["tracked"], src["merged"] = z["tracked"], z["merged"]
         else:
             src["tracked"] = src["merged"] = src["steady"]
+        for k in ("lines", "combined"):  # no tracking: the steady lines throughout
+            src.setdefault(k, src["steady"])
         if oct_ == 0.5:
             src = {k: halves(v) for k, v in src.items()}
         cov = {k: np.abs(_nearest_dist(tb, v)) < 10 for k, v in src.items()}
@@ -81,8 +83,9 @@ def main():
         tot["share"] += float(z["merged_share"]) if "merged_share" in z else 0
     n = tot["beats"]
     print(f"{n_maps} maps, {n:.0f} true beats; mean tracked share in hybrid {tot['share'] / max(1, n_maps):.2f}")
-    for k in ("steady", "tracked", "merged", "final", "oracle"):
-        print(f"  {k:8} cover10 {tot[k] / n:.1%}")
+    for k in ("steady", "tracked", "merged", "lines", "combined", "final", "oracle"):
+        if k in tot:
+            print(f"  {k:8} cover10 {tot[k] / n:.1%}")
 
 
 if __name__ == "__main__":

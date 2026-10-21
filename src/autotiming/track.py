@@ -390,7 +390,21 @@ def run_features(o, steady, tracked, sb, L, k, k2, a, b, mass, start, end, third
     d_bound = np.min(np.abs(np.r_[starts[1:], np.inf] - (lo_t + hi_t) / 2)) if len(starts) > 1 else np.inf
     song_rate = len(t) / max(1.0, t[-1] - t[0])
     run_rate = (b - a) / max(1.0, hi_t - lo_t + Lr)
+    # tracked beats against the steady grid: a constant offset (soft attacks), a slope (drift) or noise
+    tb = tracked.times[sel]
+    off = slope = resid = 0.0
+    if len(tb) >= 3:
+        j = np.clip(np.searchsorted(sb, tb), 1, len(sb) - 1)
+        d = np.where(np.abs(tb - sb[j - 1]) < np.abs(tb - sb[j]), tb - sb[j - 1], tb - sb[j])
+        x = np.arange(len(d), dtype=float)
+        A = np.vstack([x, np.ones_like(x)]).T
+        (slope, icpt), *_ = np.linalg.lstsq(A, d, rcond=None)
+        resid = float(np.std(d - A @ np.array([slope, icpt])))
+        off = float(np.median(d))
     return {
+        "off_ms": abs(off),
+        "off_slope": float(abs(slope)),
+        "off_resid": resid,
         **{n: float(v) for n, v in base.items()},
         "beats": float(k2 - k),
         "dur_s": float((hi_t - lo_t) / 1000),
@@ -425,6 +439,8 @@ def run_aggregates(feats: list[dict]) -> dict:
         "agg_gain_shift": med("gain_shift"),
         "agg_best_shift": med("best_shift"),
         "agg_iv_cv": med("iv_cv"),
+        "agg_off_slope": med("off_slope"),
+        "agg_off_resid": med("off_resid"),
     }
 
 

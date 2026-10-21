@@ -158,6 +158,8 @@ def matrix(rows, names):
     y = np.array([r["cov_t"] > r["cov_s"] for r in rows])
     w = np.array([abs(r["cov_t"] - r["cov_s"]) for r in rows], float) + 0.1
     w[~y] *= float(os.environ.get("RUN_NEG_W", "1"))  # a wrong switch costs more than a missed one (it can break a clean map)
+    # heavy sets outnumber single-line maps 4:1 in runs: weigh those back up, they are most of what visitors upload
+    w[np.array([r["kind"] == "single" for r in rows])] *= float(os.environ.get("RUN_SINGLE_W", "1"))
     return X, y, w
 
 
@@ -196,9 +198,9 @@ def cmd_cv(thr=0.5):
     for t in (0.4, 0.5, 0.6, 0.7):
         report(train, p >= t, f"trees (5-fold) p >= {t}")
     rule = np.array([r["rule"] > 0 for r in train])
-    for t in (0.6, 0.7, 0.8):
-        report(train, rule | (p >= t), f"rule or trees p >= {t}")
-        report(train, (rule & (p >= 0.3)) | (p >= t), f"(rule and p >= 0.3) or p >= {t}")
+    for lo in (0.3, 0.5):
+        for t in (0.7, 0.8):
+            report(train, (rule & (p >= lo)) | (p >= t), f"(rule and p >= {lo}) or p >= {t}")
     if os.environ.get("RUN_CV_LIST"):  # worst runs the trees take on single-line maps
         bad = sorted((r["cov_t"] - r["cov_s"], r["id"], round(r["a"]), pi, {n: round(r[n], 3) for n in names})
                      for r, pi in zip(train, p) if pi >= thr and r["kind"] == "single" and r["cov_t"] < r["cov_s"])

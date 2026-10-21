@@ -95,7 +95,8 @@ def ours(path) -> list[Segment]:
     from autotiming import detect as D
 
     # learned models that never saw this song (bench/octave_trees_exp.py, bench/phase_trees_exp.py crossfit)
-    for env, name, attr in (("OCTAVE_CROSSFIT", "octave", "OCTAVE_TREES"), ("PHASE_CROSSFIT", "phase", "PHASE_TREES")):
+    for env, name, attr in (("OCTAVE_CROSSFIT", "octave", "OCTAVE_TREES"), ("PHASE_CROSSFIT", "phase", "PHASE_TREES"),
+                            ("SECPHASE_CROSSFIT", "secphase", "SECPHASE_TREES")):
         if os.environ.get(env) == "1":
             import hashlib
             import json
