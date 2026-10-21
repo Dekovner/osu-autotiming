@@ -6,6 +6,11 @@
     uv run python bench/run.py ranked --ids data/subset_ramp.txt   # a subset first
 
 Results are cached per (dataset, method) in data/results/; delete a file to rerun.
+
+Each distinct audio file is detected once (byte-identical songs in several mapsets
+are ~1/5 of ranked), onsets come from bench/cache_onsets.py's exact cache
+(BENCH_ONSET_CACHE=0 to recompute), and workers run SCHED_IDLE: they only take
+CPU the desktop leaves free.
 """
 
 import os
@@ -15,6 +20,7 @@ for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMBA_
     os.environ.setdefault(_v, "1")
 
 import argparse
+import hashlib
 import json
 import sys
 import time
@@ -114,17 +120,52 @@ DATASETS = {
 }
 
 
-def run_one(method, item):
+def run_group(method, items):
+    """One detection per audio file, scored against every item on it: a song ranked in
+    several mapsets is often the very same file, and the detector is deterministic.
+    The repeats get secs 0, so summed secs stay the CPU time spent."""
     t0 = time.time()
     try:
-        pred = METHODS[method](item["audio"])
-        res = compare(pred, item["truth"], *item["span"])
-        res["pred"] = [[s.time, s.beat_length] for s in pred]
+        pred, err = METHODS[method](items[0]["audio"]), None
     except Exception as e:
-        res = {"ok": False, "error": f"{type(e).__name__}: {e}", "tb": traceback.format_exc(limit=3)}
-    res.update(id=item["id"], tags=item["tags"], secs=round(time.time() - t0, 2),
-               truth=[[s.time, s.beat_length] for s in item["truth"]])
-    return res
+        pred, err = None, {"ok": False, "error": f"{type(e).__name__}: {e}", "tb": traceback.format_exc(limit=3)}
+    secs = round(time.time() - t0, 2)
+    rows = []
+    for k, item in enumerate(items):
+        res = dict(err) if err else None
+        if res is None:
+            try:
+                res = compare(pred, item["truth"], *item["span"])
+                res["pred"] = [[s.time, s.beat_length] for s in pred]
+            except Exception as e:
+                res = {"ok": False, "error": f"{type(e).__name__}: {e}", "tb": traceback.format_exc(limit=3)}
+        res.update(id=item["id"], tags=item["tags"], secs=secs if k == 0 else 0.0,
+                   truth=[[s.time, s.beat_length] for s in item["truth"]])
+        if k:
+            res["same_audio_as"] = items[0]["id"]
+        rows.append(res)
+    return rows
+
+
+def by_audio(items):
+    """Items grouped by the md5 of their audio file, in first-seen order."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    md5 = lambda it: hashlib.md5(Path(it["audio"]).read_bytes()).hexdigest()
+    with ThreadPoolExecutor(8) as ex:
+        keys = list(ex.map(md5, items))
+    groups = defaultdict(list)
+    for key, it in zip(keys, items):
+        groups[key].append(it)
+    return list(groups.values())
+
+
+def background():
+    """Bench workers only take CPU nobody else wants (SCHED_IDLE), so the desktop stays smooth."""
+    try:
+        os.sched_setscheduler(0, os.SCHED_IDLE, os.sched_param(0))
+    except (AttributeError, OSError):
+        os.nice(19)
 
 
 TAG = os.environ.get("BENCH_TAG", "")  # results of a variant go to their own file
@@ -156,7 +197,7 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("dataset", choices=DATASETS)
     p.add_argument("--methods", nargs="+", default=["ours"])
-    p.add_argument("--workers", type=int, default=4)
+    p.add_argument("--workers", type=int, default=12)  # SCHED_IDLE: they only take spare CPU
     p.add_argument("--summary-only", action="store_true")
     p.add_argument("--rescore", action="store_true", help="recompute metrics from cached predictions")
     p.add_argument("--by", help="tag to break the summary down by")
@@ -172,14 +213,18 @@ def main():
         for method in args.methods:
             done = {r["id"] for r in load(args.dataset, method)}
             todo = [it for it in items if it["id"] not in done]
-            print(f"{method}: {len(todo)} to run", flush=True)
-            with ProcessPoolExecutor(args.workers, initializer=os.nice, initargs=(15,)) as ex, (RESULTS / f"{args.dataset}_{method}{TAG}.jsonl").open("a") as out:
-                futs = [ex.submit(run_one, method, it) for it in todo]
+            groups = by_audio(todo)
+            print(f"{method}: {len(todo)} to run, {len(groups)} distinct audio files", flush=True)
+            # longest songs first: a 17-minute marathon started last would leave one worker running alone
+            groups.sort(key=lambda g: -Path(g[0]["audio"]).stat().st_size)
+            with ProcessPoolExecutor(args.workers, initializer=background) as ex, (RESULTS / f"{args.dataset}_{method}{TAG}.jsonl").open("a") as out:
+                futs = [ex.submit(run_group, method, g) for g in groups]
                 for i, f in enumerate(as_completed(futs), 1):
-                    out.write(json.dumps(f.result()) + "\n")
+                    for row in f.result():
+                        out.write(json.dumps(row) + "\n")
                     out.flush()
                     if i % 50 == 0:
-                        print(f"  {i}/{len(todo)}", flush=True)
+                        print(f"  {i}/{len(groups)}", flush=True)
     ids = {it["id"] for it in items}
     if args.rescore:  # metric changed: recompute from cached predictions, no detection
         by_id = {it["id"]: it for it in items}

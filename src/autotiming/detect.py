@@ -177,26 +177,74 @@ def _coherence(times, weights, Ls):
     return out
 
 
+@njit(cache=True, parallel=True)
+def _phasor_parts(times, weights, part, n_parts, Ls):
+    """_coherence's six sums (beat, 1/2, 1/4 phasors) per part of the onsets instead of
+    over all of them: overlapping windows are then sums of parts, each onset turned once."""
+    out = np.zeros((n_parts, len(Ls), 6))
+    for j in prange(len(Ls)):
+        k = 2 * np.pi / Ls[j]
+        for n in range(len(times)):
+            a = k * times[n]
+            c, s = np.cos(a), np.sin(a)
+            c2, s2 = c * c - s * s, 2 * c * s
+            c4, s4 = c2 * c2 - s2 * s2, 2 * c2 * s2
+            w, p = weights[n], part[n]
+            out[p, j, 0] += w * c; out[p, j, 1] += w * s
+            out[p, j, 2] += w * c2; out[p, j, 3] += w * s2
+            out[p, j, 4] += w * c4; out[p, j, 5] += w * s4
+    return out
+
+
+def window_coherence(t, w, ranges, Ls, batch=48) -> np.ndarray:
+    """coherence(t[lo:hi], w[lo:hi], Ls) for every (lo, hi) in ranges (sorted, overlapping).
+
+    The range ends cut the onsets into parts; a window is the sum of its parts' phasors.
+    Batches of windows bound the memory on hour-long songs."""
+    out = np.zeros((len(ranges), len(Ls)))
+    t, w, Ls = (np.ascontiguousarray(x, np.float64) for x in (t, w, Ls))
+    for s in range(0, len(ranges), batch):
+        rs = ranges[s:s + batch]
+        lo, hi = min(r[0] for r in rs), max(r[1] for r in rs)
+        if hi <= lo:
+            continue
+        cuts = np.unique([lo, hi] + [x for r in rs for x in r])
+        part = np.searchsorted(cuts, np.arange(lo, hi), side="right") - 1
+        P = _phasor_parts(t[lo:hi], w[lo:hi], part, len(cuts) - 1, Ls)
+        for i, (a, b) in enumerate(rs):
+            if b <= a:
+                continue
+            S = P[np.searchsorted(cuts, a):np.searchsorted(cuts, b)].sum(axis=0)
+            out[s + i] = (np.sqrt(S[:, 0] ** 2 + S[:, 1] ** 2) + 0.5 * np.sqrt(S[:, 2] ** 2 + S[:, 3] ** 2)
+                          + 0.25 * np.sqrt(S[:, 4] ** 2 + S[:, 5] ** 2))
+    return out
+
+
+# coarse pass every 4th beat length, then the full grid around its 8 best points; short grids in full
+REFINE_STRIDE, REFINE_KEEP, REFINE_SMALL = 4, 8, 64
+
+
 def refine_period(times, weights, L0, span=0.015):
     """Beat length near L0 at which all onsets of the song are most coherent.
 
     Coherence = weighted resultant length of onset phases at the beat and its
     1/2, 1/4 subdivisions. Its peak is ~1/duration wide, so stepping finely over
-    ±1.5% lands within a small fraction of a millisecond per beat.
+    ±1.5% lands within a small fraction of a millisecond per beat. On long grids
+    a pass over every REFINE_STRIDE-th step finds where the top is, and every
+    step is scored only around its best points and the far end: on all songs of
+    the bench this picks the same step as scoring them all (bench/check_fast.py),
+    at ~1/3 of the work.
     """
     T = max(times[-1] - times[0], 1.0)
     step = max(L0 * L0 / (40 * T), L0 * 2e-6)
     Ls = np.arange(L0 * (1 - span), L0 * (1 + span), step)
     if len(Ls) > 4000:
         Ls = np.linspace(L0 * (1 - span), L0 * (1 + span), 4000)
-    best_L, best_c = L0, -1.0
-    for s in range(0, len(Ls), 256):
-        chunk = Ls[s:s + 256]
-        c = coherence(times, weights, chunk)
-        i = int(np.argmax(c))
-        if c[i] > best_c:
-            best_L, best_c = float(chunk[i]), float(c[i])
-    return best_L
+    if len(Ls) > REFINE_SMALL:
+        c = coherence(times, weights, Ls[::REFINE_STRIDE])
+        best = np.r_[np.argsort(-c, kind="stable")[:REFINE_KEEP] * REFINE_STRIDE, len(Ls) - 1]
+        Ls = Ls[np.unique(np.clip((best[:, None] + np.arange(-REFINE_STRIDE, REFINE_STRIDE + 1)).ravel(), 0, len(Ls) - 1))]
+    return float(Ls[int(np.argmax(coherence(times, weights, Ls)))])
 
 
 def grid_excess(times, weights, phi, L, subdiv=4, tol=8.0):
@@ -264,12 +312,15 @@ def local_tempo_path(t, w, L_lo=60000 / 400, L_hi=60000 / 60, win_ms=WIN_MS, hop
     Ls = L_lo * L_STEP ** np.arange(int(np.log(L_hi / L_lo) / np.log(L_STEP)) + 1)
     centers = np.arange(t[0] + win_ms / 2, max(t[-1] - win_ms / 2, t[0] + win_ms / 2) + 1, hop_ms)
     E = np.zeros((len(centers), len(Ls)))
-    for i, c in enumerate(centers):
-        sel = np.abs(t - c) < win_ms / 2
-        if sel.sum() < 6:
-            continue
-        tt, ww = t[sel], w[sel]
-        E[i] = coherence(tt, ww, Ls) / (ww.sum() * sum(a for _, a in HARMONICS))
+    # onsets are sorted, so each window is a slice of them; windows overlap (10 s every 2.5 s)
+    ranges = []
+    for c in centers:
+        sel = np.flatnonzero(np.abs(t - c) < win_ms / 2)
+        ranges.append((int(sel[0]), int(sel[-1]) + 1) if len(sel) >= 6 else (0, 0))
+    C = window_coherence(t, w, ranges, Ls)
+    for i, (lo, hi) in enumerate(ranges):
+        if hi > lo:
+            E[i] = C[i] / (w[lo:hi].sum() * sum(a for _, a in HARMONICS))
     if prior_L is not None:  # soft preference for the main tempo, against x1.5 / x0.67 slides
         E -= prior_w * np.log(Ls / prior_L)[None, :] ** 2
     # Viterbi: moving to a neighbouring L (drift) is free, anything else costs JUMP_COST

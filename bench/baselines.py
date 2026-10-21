@@ -103,7 +103,12 @@ def ours(path) -> list[Segment]:
             cf = Path(os.environ.get(f"{env}_DIR") or Path(__file__).resolve().parents[1] / "data" / f"{name}_crossfit")
             fold = json.loads((cf / "assign.json").read_text()).get(hashlib.md5(Path(path).read_bytes()).hexdigest())
             setattr(D, attr, cf / f"fold{fold}.npz" if fold is not None else Path(D.__file__).resolve().parent / "models" / f"{name}_trees.npz")
-    return D.detect(path)
+    if os.environ.get("AUTOTIMING_FINE", "0") == "1" or os.environ.get("BENCH_ONSET_CACHE", "1") == "0":
+        return D.detect(path)
+    from cache_onsets import exact_onsets  # D.detect, with onsets from disk when the song was seen
+
+    pcm, sr = D.decode_bass(path)
+    return D.detect_full(exact_onsets(path, pcm, sr), pcm, sr)
 
 
 def ours_steady(path) -> list[Segment]:
