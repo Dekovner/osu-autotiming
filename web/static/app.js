@@ -149,6 +149,16 @@ function shiftAll(beats) {
   refresh();
 }
 
+// a tempo in doubt (the server's octave_alts): the whole song (from/to null) or one section,
+// whose red lines all take the runner-up tempo at once (x2 / x0.5), times kept
+const inSpan = (a, l) => (a.from == null || l.time >= a.from - 5) && (a.to == null || l.time < a.to - 5);
+function scaleSpan(a) {
+  if (!lines.some((l) => inSpan(a, l))) return;
+  commit();
+  lines = lines.map((l) => (inSpan(a, l) ? { ...l, beat_length: l.beat_length / a.factor } : l));
+  refresh();
+}
+
 function addLineAt(t, e = null) {
   if (!lines.length) return;
   const base = lines[lineAt(t)];
@@ -628,12 +638,27 @@ function showNotes(res) {
     notes.push(`<b>not sure where "1" is</b>: play it, the high click of the metronome is "1". ` +
       `If it isn't the start of the bar, <button id="db-alt">try "1" ${way}</button> (the second guess), or all −1 / all +1 above the red lines.`);
   }
+  const octs = (res.octave_alts || []).filter((a) => lines.some((l) => inSpan(a, l)));
+  octs.forEach((a, k) => {
+    const hit = lines.filter((l) => inSpan(a, l));
+    const span = (l) => { const i = lines.indexOf(l); return (i + 1 < lines.length ? lines[i + 1].time : duration) - l.time; };
+    const main = hit.reduce((x, y) => (span(y) > span(x) ? y : x));
+    const where = a.from == null ? "the tempo" : `${fmtClock(a.from)}${a.to == null ? " to the end" : `–${fmtClock(a.to)}`}`;
+    notes.push(`<b>${where} could be ${fmtBpm(bpmOf(main) * a.factor)} BPM, not ${fmtBpm(bpmOf(main))}</b>: ` +
+      `mappers pick either for songs like this. <button class="oct-alt" data-k="${k}">try ×${a.factor === 2 ? "2" : "½"}` +
+      `${a.from == null ? " everywhere" : " there"}</button>`);
+  });
   if (phaseUncertain) notes.push("<b>beat phase uncertain</b>: if the grid feels on the offbeat, press all −½ (or all +½) above the red lines.");
   if (!notes.length) notes.push("red lines sit on guessed downbeats (the high click): if \"1\" is elsewhere, press all −1 / all +1 above the red lines.");
   const box = $("notes");
   box.innerHTML = notes.map((n) => `<p>${n}</p>`).join("");
-  box.classList.toggle("unsure", !!(res.downbeat_uncertain && beats) || phaseUncertain);
+  box.classList.toggle("unsure", !!(res.downbeat_uncertain && beats) || phaseUncertain || octs.length > 0);
   box.hidden = false;
+  box.querySelectorAll(".oct-alt").forEach((b) => (b.onclick = () => {
+    scaleSpan(octs[+b.dataset.k]);
+    b.disabled = true;
+    b.textContent = "done (ctrl+z undoes it)";
+  }));
   const b = $("db-alt");
   if (b) b.onclick = () => { shiftAll(beats); b.disabled = true; b.textContent = "moved (ctrl+z undoes it)"; };
 }

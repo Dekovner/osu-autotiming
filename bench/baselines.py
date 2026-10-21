@@ -100,7 +100,7 @@ def ours(path) -> list[Segment]:
             import hashlib
             import json
 
-            cf = Path(__file__).resolve().parents[1] / "data" / f"{name}_crossfit"
+            cf = Path(os.environ.get(f"{env}_DIR") or Path(__file__).resolve().parents[1] / "data" / f"{name}_crossfit")
             fold = json.loads((cf / "assign.json").read_text()).get(hashlib.md5(Path(path).read_bytes()).hexdigest())
             setattr(D, attr, cf / f"fold{fold}.npz" if fold is not None else Path(D.__file__).resolve().parent / "models" / f"{name}_trees.npz")
     return D.detect(path)
