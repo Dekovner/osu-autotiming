@@ -20,6 +20,7 @@ let past = [], future = [];
 let view = { start: 0, span: 8000 };
 let playing = false, playCtx0 = 0, playPos0 = 0, source = null, rate = 1, cursor = 0;
 let metroNext = 0, phaseUncertain = false, fileName = "", firstRef = 0;  // firstRef: the server's first line
+let songFile = null, serverLines = [];  // what "send fix" sends along with the edited lines
 let hoverT = null;  // pointer position on the waveform (osu ms), for the readout
 
 // ---------- time & grid helpers ----------
@@ -600,6 +601,11 @@ async function load(file) {
   phaseUncertain = res.phase_uncertain;
   past = []; future = [];
   lines = res.lines.map((l) => ({ time: Math.round(l.time), beat_length: l.beat_length, meter: l.meter }));
+  songFile = file;
+  serverLines = JSON.parse(JSON.stringify(lines));
+  $("send-fix").disabled = false;
+  $("send-fix").textContent = "send fix";
+  $("send-fix").classList.remove("sent");
   sel = 0;
   firstRef = cursor = lines[0].time;
   // a negative first line (the song opens on its downbeat) must be on screen too
@@ -669,6 +675,37 @@ $("copy").onclick = async () => {
   setTimeout(() => ($("copy").textContent = "copy"), 1200);
 };
 $("again").onclick = () => $("file").click();
+
+// a visitor's fix goes to the server with the song (web/api.py, POST /feedback): the songs the
+// detector gets wrong, with the timing that is right, are the bench set it is missing
+const FIX_MAX_MB = 30;  // web/api.py MAX_BYTES: songs, not marathons
+const plain = (ls) => JSON.stringify(ls.map((l) => ({ time: Math.round(l.time), beat_length: l.beat_length, meter: l.meter })));
+$("send-fix").onclick = async () => {
+  const b = $("send-fix");
+  const say = (msg) => { b.textContent = msg; setTimeout(() => { if (!b.disabled) b.textContent = "send fix"; }, 2500); };
+  if (!songFile) return;
+  if (plain(lines) === plain(serverLines)) { say("fix the timing first"); return; }
+  if (songFile.size > FIX_MAX_MB * 1048576) { say(`songs up to ${FIX_MAX_MB} MB`); return; }
+  const note = prompt("Send this song and your corrected timing to auneu? They're kept only to test and improve " +
+    "the timing detector.\n\nWhat was wrong? (optional)", "");
+  if (note === null) return;
+  b.disabled = true;
+  b.textContent = "sending…";
+  const form = new FormData();
+  form.append("timing", JSON.stringify({ original: serverLines, fixed: JSON.parse(plain(lines)), file: fileName, note }));
+  form.append("file", songFile);
+  let res;
+  try {
+    const r = await fetch("api/feedback", { method: "POST", body: form });
+    res = await r.json().catch(() => ({ error: `server error ${r.status}` }));
+  } catch (e) {
+    res = { error: "can't reach the server" };
+  }
+  if (res.ok) { b.textContent = "sent, thanks!"; b.classList.add("sent"); return; }
+  b.disabled = false;
+  b.textContent = "send fix";
+  status(res.error, true);
+};
 
 const onField = (id, apply) => {
   const el = $(id);

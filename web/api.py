@@ -10,6 +10,8 @@ GET /job/<id>
       "downbeat_uncertain", "downbeat_alt": beats from "1" to the runner-up "1" (1..3) or null,
       "duration_ms", "audio_lag_ms", "wave": {"ms_per_px": 1, "min": base64 int8, "max": base64 int8},
       "env": {"ms": 1, "data": base64 uint8}, "seconds"}
+POST /feedback  (multipart: file=<audio>, timing={"original": lines, "fixed": lines, "file", "note"})
+  -> {"ok": true}   a visitor's corrected timing, kept with the song in FEEDBACK_DIR
 
 The waveform and the 1 ms energy envelope come from the BASS decode osu! uses,
 so the page can line its own (browser) decode up with osu! time. Songs wait
@@ -31,6 +33,8 @@ today is turned away while it uploads, rather than after 160 MB went through the
 
 import asyncio
 import base64
+import hashlib
+import json
 import logging
 import math
 import os
@@ -60,6 +64,13 @@ MARATHON_QUEUE = int(os.environ.get("MARATHON_QUEUE", "5"))
 MARATHON_PER_IP_PER_DAY = int(os.environ.get("MARATHON_PER_IP_PER_DAY", "3"))
 JOB_TTL = 600.0  # seconds a finished result is kept for the page to fetch
 AUDIO_EXT = {".mp3", ".ogg", ".wav"}
+# fixes visitors send from the editor (POST /feedback): the song and their corrected timing, a
+# bench set of the songs the detector gets wrong (bench/run.py site). Songs only, no marathons.
+FEEDBACK_DIR = Path(os.environ.get("FEEDBACK_DIR", "/data/feedback"))
+FEEDBACK_PER_IP_PER_DAY = int(os.environ.get("FEEDBACK_PER_IP_PER_DAY", "10"))
+FEEDBACK_MAX_TOTAL = int(os.environ.get("FEEDBACK_MAX_TOTAL", str(3 << 30)))  # bytes kept at most, then refused
+FEEDBACK_MAX_LINES = 2000
+FEEDBACK_MAX_NOTE = 1000
 
 
 def _worker_init(threads: int = 1):
@@ -296,6 +307,83 @@ async def handle_job(request: web.Request) -> web.Response:
     return web.json_response({"status": "done", **res}, status=400 if "error" in res else 200)
 
 
+def clean_lines(lines) -> list[dict] | None:
+    """Red lines from the page as plain numbers, None if they don't look like a timing."""
+    if not isinstance(lines, list) or not 0 < len(lines) <= FEEDBACK_MAX_LINES:
+        return None
+    out = []
+    for l in lines:
+        try:
+            t, L, m = float(l["time"]), float(l["beat_length"]), int(l["meter"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if not (math.isfinite(t) and abs(t) < 4e6 and math.isfinite(L) and 5 <= L <= 10000 and 1 <= m <= 32):
+            return None
+        out.append({"time": t, "beat_length": L, "meter": m})
+    return out
+
+
+def feedback_bytes() -> int:
+    return sum(f.stat().st_size for f in FEEDBACK_DIR.rglob("*") if f.is_file()) if FEEDBACK_DIR.exists() else 0
+
+
+async def handle_feedback(request: web.Request) -> web.Response:
+    """A visitor's fix: the song plus the timing we gave and the one they corrected it to.
+    Kept as <audio md5>/audio.<ext> and one fix-*.json per sending (the same song twice is stored once)."""
+    app = request.app
+    ip = request.headers.get("X-Real-IP") or request.remote or "?"
+    if app["flimiter"].left(ip) <= 0:
+        return web.json_response({"error": f"that's {FEEDBACK_PER_IP_PER_DAY} fixes today, thanks! send more tomorrow"}, status=429)
+    if feedback_bytes() > FEEDBACK_MAX_TOTAL:
+        return web.json_response({"error": "the fix box is full for now, thanks anyway"}, status=503)
+    reader = await request.multipart()
+    meta, path = None, None
+    FEEDBACK_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = tempfile.TemporaryDirectory(dir=FEEDBACK_DIR, prefix=".upload-")  # same filesystem: kept by a rename
+    try:
+        async for part in reader:
+            if part.name == "timing":
+                try:
+                    meta = json.loads(await part.text())
+                except ValueError:
+                    return web.json_response({"error": "bad timing"}, status=400)
+            elif part.name == "file":
+                ext = Path(part.filename or "").suffix.lower()
+                if ext not in AUDIO_EXT:
+                    return web.json_response({"error": "send an mp3, ogg or wav file"}, status=400)
+                path, size, md5 = Path(tmp.name) / f"audio{ext}", 0, hashlib.md5()
+                with path.open("wb") as f:
+                    while chunk := await part.read_chunk(1 << 16):
+                        size += len(chunk)
+                        if size > MAX_BYTES:
+                            return web.json_response({"error": f"fixes are for songs up to {MAX_BYTES >> 20} MB"}, status=413)
+                        md5.update(chunk)
+                        f.write(chunk)
+        if path is None or not isinstance(meta, dict):
+            return web.json_response({"error": "no file or no timing"}, status=400)
+        original, fixed = clean_lines(meta.get("original")), clean_lines(meta.get("fixed"))
+        if original is None or fixed is None:
+            return web.json_response({"error": "bad timing"}, status=400)
+        seconds = await probe(app, path)
+        if seconds is None or seconds > MAX_MINUTES * 60:
+            return web.json_response({"error": "that file isn't a song we can read (up to 15 min)"}, status=400)
+        d = FEEDBACK_DIR / md5.hexdigest()
+        d.mkdir(parents=True, exist_ok=True)
+        if not any(d.glob("audio.*")):
+            path.replace(d / path.name)
+        note = str(meta.get("note") or "")[:FEEDBACK_MAX_NOTE]
+        name = str(meta.get("file") or "")[:200]
+        rec = {"time": time.time(), "file": name, "seconds": seconds, "note": note, "original": original, "fixed": fixed}
+        out = d / f"fix-{int(time.time())}-{secrets.token_hex(3)}.json"
+        out.with_suffix(".tmp").write_text(json.dumps(rec))
+        out.with_suffix(".tmp").replace(out)
+        app["flimiter"].allow(ip)  # only fixes that were kept count
+        log.info("fix received: %s (%d -> %d lines)%s", d.name, len(original), len(fixed), f": {note[:80]!r}" if note else "")
+        return web.json_response({"ok": True})
+    finally:
+        tmp.cleanup()
+
+
 async def worker(app, marathon: bool = False):
     """One of WORKERS (or MARATHON_WORKERS) loops: take the oldest queued song, analyse it in its process pool."""
     loop = asyncio.get_running_loop()
@@ -336,6 +424,7 @@ async def janitor(app):
             del app["jobs"][k]
         app["limiter"].prune()
         app["mlimiter"].prune()
+        app["flimiter"].prune()
 
 
 async def start_background(app):
@@ -357,11 +446,13 @@ def make_app() -> web.Application:
     app["probe"] = ProcessPoolExecutor(max_workers=1)
     app["limiter"] = Limiter(PER_IP_PER_HOUR)
     app["mlimiter"] = Limiter(MARATHON_PER_IP_PER_DAY, 86400.0)
+    app["flimiter"] = Limiter(FEEDBACK_PER_IP_PER_DAY, 86400.0)
     app["queue"], app["waiting"], app["running"], app["jobs"] = asyncio.Queue(), [], 0, {}
     app["mqueue"], app["mwaiting"], app["mrunning"] = asyncio.Queue(), [], 0
     app.on_startup.append(start_background)
     app.router.add_post("/analyze", handle_analyze)
     app.router.add_get("/job/{id}", handle_job)
+    app.router.add_post("/feedback", handle_feedback)
     app.router.add_get("/health", handle_health)
     return app
 

@@ -28,6 +28,8 @@ services:
       MARATHON_THREADS: 2   # on 2 threads (37 min: 47 s on one, 26 s on 4)
     ports:
       - "127.0.0.1:8431:8431"   # localhost only
+    volumes:
+      - feedback:/data/feedback # songs + timings visitors fixed (bench/fetch_site.sh copies them out)
     cpus: 7.0               # all of it, marathon included: the host can't spare more (songs and a marathon share when busy)
     mem_limit: 6g           # stress test: 6 songs of 14.5 min 3.05 GB at most, a 37 min marathon 1.4 GB (60 min ~2.2)
     cap_drop: [ALL]         # strangers' files go through a native decoder in here
@@ -37,3 +39,6 @@ services:
       options:
         max-size: "5m"
         max-file: "2"
+
+volumes:
+  feedback:

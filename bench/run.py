@@ -83,6 +83,25 @@ def ranked_items(root=None):
             }
 
 
+def site_items(root=None):
+    """Fixes visitors sent from the editor (web/api.py POST /feedback, copied here by
+    bench/fetch_site.sh): <audio md5>/audio.<ext> + fix-*.json; the latest fix is the truth."""
+    for d in sorted((root or DATA / "site").glob("*")):
+        audio = next(d.glob("audio.*"), None)
+        fixes = sorted(d.glob("fix-*.json"))
+        if audio is None or not fixes:
+            continue
+        rec = json.loads(fixes[-1].read_text())
+        truth = [Segment(l["time"], l["beat_length"], l["meter"]) for l in sorted(rec["fixed"], key=lambda l: l["time"])]
+        n = len(truth)
+        yield {
+            "id": f"{d.name}/{audio.name}", "audio": str(audio), "truth": truth,
+            "span": [max(0.0, truth[0].time), rec["seconds"] * 1000],
+            "tags": {"segments": n, "kind": "single" if n == 1 else ("few" if n <= 5 else "many"),
+                     "ext": audio.suffix.lower(), "fixes": len(fixes), "note": rec.get("note", "")},
+        }
+
+
 DATASETS = {
     "synth": synth_items,
     "ranked": ranked_items,
@@ -90,6 +109,8 @@ DATASETS = {
     "nominated": lambda: ranked_items(DATA / "nominated"),
     # maps mappers reported after testing the bot by hand (bench/make_feedback.py)
     "feedback": lambda: ranked_items(DATA / "feedback"),
+    # songs visitors corrected on auneu.space/timing (bench/fetch_site.sh): what the detector gets wrong
+    "site": site_items,
 }
 
 

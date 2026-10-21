@@ -122,6 +122,7 @@ select { padding: 2px 4px; font-family: var(--mono); font-size: 0.78rem; }
 .joint b { color: var(--don); font-weight: 500; }
 
 .out { margin-top: 28px; }
+#send-fix.sent:disabled { opacity: 1; color: var(--kat); }
 /* above the waveform: the grid is judged there, so the doubts must be read there */
 .notes { margin: 0 0 4px; padding: 6px 2px; font-size: 0.75rem; color: var(--muted); }
 .notes p { margin: 0; }
