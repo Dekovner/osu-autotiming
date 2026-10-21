@@ -120,6 +120,27 @@ function edit(fn) {
   refresh();
 }
 
+// the whole timing by half of each line's own beat: a grid on the offbeat, ramps included.
+// Lines of different BPM move by different amounts, so joints that were on the grid come
+// out a few ms off (a double barline): half the difference of the two beats, which no grid
+// pair can avoid. Like the detector's connect_lines, a long section at a round BPM keeps it
+// and the next line moves onto its grid; otherwise the earlier line's BPM absorbs the gap
+const SHIFT_JOINT_MAX = 30;  // ms: a joint the shift opened wider than this was no joint (e.g. a x2 jump)
+const isRound = (bpm) => [1, 0.5, 0.25, 0.1].some((s) => Math.abs(bpm / s - Math.round(bpm / s)) < 1e-6);
+function shiftAll(dir) {
+  if (!lines.length) return;
+  commit();
+  const clean = lines.map((_, i) => { const j = joint(i); return j !== null && Math.abs(j.off) < 0.5; });
+  lines = lines.map((l) => ({ ...l, time: Math.round(l.time + dir * l.beat_length / 2) }));  // order kept: sel stays
+  lines.forEach((l, i) => {
+    const j = joint(i);
+    if (!clean[i] || Math.abs(j.off) < 0.5 || Math.abs(j.off) > SHIFT_JOINT_MAX) return;
+    if (j.n >= 32 && isRound(bpmOf(l))) lines[i + 1] = { ...lines[i + 1], time: Math.round(j.land) };
+    else l.beat_length = (lines[i + 1].time - l.time) / j.n;
+  });
+  refresh();
+}
+
 function addLineAt(t, e = null) {
   if (!lines.length) return;
   const base = lines[lineAt(t)];
@@ -577,7 +598,7 @@ async function load(file) {
   view = { start: lines[0].time < 0 ? lines[0].time - 300 : Math.max(0, lines[0].time - 1000), span: Math.min(8000, duration) };
   status(`${lines.length} red line${lines.length > 1 ? "s" : ""} in ${res.seconds.toFixed(1)} s`);
   const notes = [];
-  if (phaseUncertain) notes.push("<b>beat phase uncertain</b>: if the grid feels on the offbeat, select the first line and press ½ beat.");
+  if (phaseUncertain) notes.push("<b>beat phase uncertain</b>: if the grid feels on the offbeat, press all −½ (or all +½) above the red lines.");
   notes.push("red lines sit on guessed downbeats; drag a line if \"1\" is elsewhere.");
   $("notes").innerHTML = notes.join("<br>");
   $("notes").hidden = false;
@@ -611,6 +632,9 @@ $("redo").onclick = redo;
 $("half").onclick = () => edit((l) => { l.beat_length *= 2; });
 $("double").onclick = () => edit((l) => { l.beat_length /= 2; });
 $("shift").onclick = () => edit((l) => { l.time += l.beat_length / 2; });
+$("shift-back").onclick = () => edit((l) => { l.time -= l.beat_length / 2; });
+$("all-back").onclick = () => shiftAll(-1);
+$("all-fwd").onclick = () => shiftAll(1);
 document.querySelectorAll("[data-nudge]").forEach((b) => (b.onclick = () => edit((l) => { l.time += +b.dataset.nudge; })));
 $("copy").onclick = async () => {
   try { await navigator.clipboard.writeText($("text").value); } catch (e) { $("text").select(); document.execCommand("copy"); }

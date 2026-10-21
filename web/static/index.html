@@ -65,6 +65,8 @@
       <div class="col-head mono">
         <span>red lines</span>
         <span class="tools">
+          <button id="all-back" title="move every red line half a beat earlier: the grid was on the offbeat">all −½</button>
+          <button id="all-fwd" title="move every red line half a beat later: the grid was on the offbeat">all +½</button>
           <button id="add" title="add a red line at the playhead (a)">+ add</button>
           <button id="undo" title="undo (ctrl+z)">undo</button>
           <button id="redo" title="redo (ctrl+shift+z)">redo</button>
@@ -90,7 +92,8 @@
         <span class="sp"></span>
         <button id="half" title="half the BPM">×½</button>
         <button id="double" title="double the BPM">×2</button>
-        <button id="shift" title="move by half a beat: the grid was on the offbeat">½ beat</button>
+        <button id="shift-back" title="half a beat earlier: the grid was on the offbeat">−½</button>
+        <button id="shift" title="half a beat later: the grid was on the offbeat">+½</button>
       </div>
       <div class="field">
         <span class="k mono">meter</span>
@@ -111,6 +114,6 @@
   </div>
 </section>
 
-<script src="app.js?v=16"></script>
+<script src="app.js?v=20"></script>
 </body>
 </html>

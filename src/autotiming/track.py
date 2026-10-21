@@ -311,6 +311,14 @@ RUN_END_BEATS = int(_env("RUN_END_BEATS", "16"))
 RUN_END_MAX_JUMP = float(_env("RUN_END_MAX_JUMP", "0.06"))  # log change of the 4-beat average per beat
 SWITCH_TOL_MS = float(_env("SWITCH_TOL_MS", "10"))  # grids this close may hand over to each other
 SWITCH_MAX_EXTEND = int(_env("SWITCH_MAX_EXTEND", "16"))  # beats a tracked run may grow to reach such a point
+# a ramp run whose first beats sit on the steady grid's "and" (this share of them within 1/8 beat
+# of it) took the other phase, e.g. slipping half a beat in the run-up: its beats move back onto the
+# steady phase, so one phase holds through the song and a half-beat fix of it fixes it all. Only
+# runs whose tempo leaves the steady one by RUN_PHASE_MIN_DEV: near it, a tracker on the "and" is a
+# phase reset or drift the steady grid doesn't follow, and moving it back cost lines on ranked maps
+RUN_PHASE_BEATS = 8
+RUN_PHASE_SHARE = float(_env("RUN_PHASE_SHARE", "0.75"))
+RUN_PHASE_MIN_DEV = float(_env("RUN_PHASE_MIN_DEV", "0.1"))
 
 
 def _quarters(beat_times: np.ndarray) -> np.ndarray:
@@ -340,14 +348,14 @@ def _runs(mask: np.ndarray, min_run: int) -> np.ndarray:
     return out
 
 
-def hybrid(o, steady: list[Segment], tracked: Beats, margin=HYBRID_MARGIN, realign=False) -> Beats:
+def hybrid(o, steady: list[Segment], tracked: Beats, margin=HYBRID_MARGIN) -> Beats:
     """Steady beats where a steady grid explains the onsets, tracked beats where it can't.
 
     The steady detector's phase is consistent over the whole song, the tracker's
     is not (it slides onto loud offbeats). Comparing both on quarter-note grids
     makes a half-beat slide neither help nor hurt the tracker; where it does win
     (rubato, drift, short tempo changes), its beats are used, moved back to the
-    steady phase if it sits on the "and".
+    steady phase if the run starts on the "and".
     """
     from .detect import weights
     from .grid import beats as grid_beats
@@ -369,6 +377,7 @@ def hybrid(o, steady: list[Segment], tracked: Beats, margin=HYBRID_MARGIN, reali
     mass = cw[hi] - cw[lo] + 1e-9
     use_t = _runs((ct[hi] - ct[lo] - (cs[hi] - cs[lo])) / mass > margin, HYBRID_MIN_RUN)
     # judge each run of tracked beats as a whole
+    devs = {}
     k = 0
     while k < len(use_t):
         if not use_t[k]:
@@ -409,14 +418,50 @@ def hybrid(o, steady: list[Segment], tracked: Beats, margin=HYBRID_MARGIN, reali
         long_ok = k2 - k >= RUN_MIN_BEATS and gain >= RUN_MIN_GAIN and gain_shift >= RUN_MIN_SHIFT_GAIN
         end_ok = (k2 >= len(use_t) - RUN_END_BEATS and gain_shift >= RUN_SHORT_SHIFT_GAIN
                   and net >= RUN_SHORT_MIN_NET and jump <= RUN_END_MAX_JUMP)
+        devs[k] = dev
         if not (long_ok or short_ok or end_ok):
             use_t[k:k2] = False
+        elif k2 >= len(use_t) - RUN_END_BEATS:  # no steady tempo left to go back to: the run ends the song
+            use_t[k2:] = True
+            k2 = len(use_t)
         k = k2
+
+    def nearest_gap(times):  # each steady beat to the nearest tracked one
+        j = np.clip(np.searchsorted(times, sb), 1, len(times) - 1)
+        return np.minimum(np.abs(sb - times[j - 1]), np.abs(sb - times[j]))
+
+    gap = nearest_gap(tracked.times)
+    mids = (tracked.times[:-1] + tracked.times[1:]) / 2
+    times, sup = tracked.times, tracked.supported
+    moved = set()  # starts of runs moved onto the steady phase: the seam there agrees by construction
+    runs, k = [], 0
+    while k < len(use_t):
+        if not use_t[k]:
+            k += 1
+            continue
+        k2 = k
+        while k2 < len(use_t) and use_t[k2]:
+            k2 += 1
+        runs.append((k, k2))
+        k = k2
+    for r, (k, k2) in enumerate(runs):
+        n = min(RUN_PHASE_BEATS, k2 - k)
+        on_and = np.mean(np.abs(gap[k:k + n] / L[k:k + n] - 0.5) < 0.125)
+        if devs.get(k, 0.0) >= RUN_PHASE_MIN_DEV and on_and >= RUN_PHASE_SHARE:
+            # up to the next run: the seam at the end may move on with these beats (see below)
+            a = sb[k] - L[k] / 2
+            b = sb[runs[r + 1][0]] - L[runs[r + 1][0]] / 2 if r + 1 < len(runs) else np.inf
+            keep, msel = (times < a) | (times >= b), (mids >= a) & (mids < b)
+            times = np.r_[times[keep], mids[msel]]
+            sup = np.r_[sup[keep], np.ones(msel.sum(), bool)]
+            order = np.argsort(times)
+            times, sup = times[order], sup[order]
+            moved.add(k)
+    tracked = Beats(times, sup, tracked.tracked_share)
     # switch sources only where the two grids agree: a run ending while the tracker and the
     # steady grid are far apart would put a phase jump mid-phrase (e.g. the last bars of a
     # tempo ramp, where onsets are too sparse to back either grid), so extend it until they meet
-    tj = np.clip(np.searchsorted(tracked.times, sb), 1, len(tracked.times) - 1)
-    gap = np.minimum(np.abs(sb - tracked.times[tj - 1]), np.abs(sb - tracked.times[tj]))
+    gap = nearest_gap(tracked.times)
     k = 0
     while k < len(use_t):
         if not use_t[k]:
@@ -429,13 +474,13 @@ def hybrid(o, steady: list[Segment], tracked: Beats, margin=HYBRID_MARGIN, reali
         while e < len(use_t) and e - k2 < SWITCH_MAX_EXTEND and gap[e] > SWITCH_TOL_MS and not use_t[e]:
             e += 1
         b = k
-        while b > 0 and k - b < SWITCH_MAX_EXTEND and gap[b - 1] > SWITCH_TOL_MS and not use_t[b - 1]:
+        while (b > 0 and k - b < SWITCH_MAX_EXTEND and gap[b - 1] > SWITCH_TOL_MS and not use_t[b - 1]
+               and not (k in moved and gap[k] <= SWITCH_TOL_MS)):
             b -= 1
         use_t[b:e] = True
         k = e
 
     out_t, out_s, k = [], [], 0
-    mids = (tracked.times[:-1] + tracked.times[1:]) / 2
     while k < len(sb):
         if not use_t[k]:
             out_t.append(sb[k])
@@ -448,10 +493,6 @@ def hybrid(o, steady: list[Segment], tracked: Beats, margin=HYBRID_MARGIN, reali
         a, b = sb[k] - L[k] / 2, sb[k2 - 1] + L[k2 - 1] / 2
         sel = (tracked.times >= a) & (tracked.times < b)
         cand, sup = tracked.times[sel], tracked.supported[sel]
-        msel = (mids >= a) & (mids < b)
-        # back to the steady phase if the tracker sits on the "and" here
-        if realign and len(cand) and msel.any() and abs(mids[msel][0] - sb[k]) < abs(cand[0] - sb[k]):
-            cand, sup = mids[msel], np.ones(msel.sum(), bool)
         out_t.extend(cand)
         out_s.extend(sup)
         k = k2
