@@ -1027,7 +1027,7 @@ def combine(o: Onsets, steady: list[Segment], tracked, anchor: float | None = No
 # exactly as they were. Compressing the whole song's beats again (lines() with its line cost) merged
 # steady sections a few tenths of a BPM apart: one tracked run at 8-21 s of a song timed in 18 steady
 # lines (2007015, 3 mapsets) left 3 lines and a 75 ms error.
-COMBINE_KEEP_STEADY = _env("COMBINE_KEEP_STEADY", "1") == "1"
+COMBINE_KEEP_STEADY = _env("COMBINE_KEEP_STEADY", "0") == "1"  # off: refine_junk re-cuts its runs from the lines around them, and on the site song (2fc1491c) the spliced lines move its 100 BPM section by half a beat
 
 
 def splice(steady: list[Segment], hyb: list[Segment], spans) -> list[Segment]:
