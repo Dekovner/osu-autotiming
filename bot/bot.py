@@ -3,7 +3,7 @@
     DISCORD_TOKEN=... python bot/bot.py
 
 Songs are analysed in BOT_WORKERS niced worker processes (default 1: a small
-VPS also running a VPN); others wait in line. Replies in English: the server is
+server); others wait in line. Replies in English: the server is
 international.
 """
 

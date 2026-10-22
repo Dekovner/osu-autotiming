@@ -12,7 +12,7 @@ RUN curl -fsSL -o /tmp/bass.zip https://www.un4seen.com/files/bass24-linux.zip \
 
 WORKDIR /app
 # dependencies in their own layer: a code change then rebuilds in seconds, not minutes of
-# pip on a VPS that also carries a VPN (keep in sync with pyproject.toml)
+# pip on a small server (keep in sync with pyproject.toml)
 RUN pip install --no-cache-dir numpy scipy requests numba "discord.py>=2.4"
 COPY pyproject.toml ./
 COPY src ./src

@@ -8,7 +8,7 @@ services:
     env_file: .env          # DISCORD_TOKEN=..., optional DISCORD_GUILD_ID=... (chmod 600)
     environment:
       BOT_WORKERS: 4        # songs at once; each takes one core and up to ~0.6 GB
-    cpus: 4.0               # the home server (12 threads) also runs game servers
+    cpus: 4.0               # the host runs other things too
     mem_limit: 4g
     logging:
       options:
