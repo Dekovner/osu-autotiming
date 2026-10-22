@@ -20,7 +20,7 @@ let past = [], future = [];
 let view = { start: 0, span: 8000 };
 let playing = false, playCtx0 = 0, playPos0 = 0, source = null, rate = 1, cursor = 0;
 let metroNext = 0, phaseUncertain = false, fileName = "", firstRef = 0;  // firstRef: the server's first line
-let songFile = null, serverLines = [];  // what "send fix" sends along with the edited lines
+let songFile = null, songCopy = null, serverLines = [];  // what "send fix" sends along with the edited lines
 let hoverT = null;  // pointer position on the waveform (osu ms), for the readout
 
 // ---------- time & grid helpers ----------
@@ -615,7 +615,11 @@ async function load(file) {
   const form = new FormData();
   form.append("file", file);
   actx = actx || new (window.AudioContext || window.webkitAudioContext)();
-  const decoding = file.arrayBuffer().then((ab) => actx.decodeAudioData(ab));
+  // "send fix" sends a copy read now: minutes later the file on disk can be gone or changed (a temp
+  // folder, an opened archive), the upload stalls and nginx drops it (408, "can't reach the server")
+  const keep = file.size <= FIX_MAX_MB * 1048576;
+  const reading = file.arrayBuffer();
+  const decoding = reading.then((ab) => actx.decodeAudioData(keep ? ab.slice(0) : ab));
   let res;
   try {
     res = await analyseOnServer(form, file.name);
@@ -637,6 +641,7 @@ async function load(file) {
   past = []; future = [];
   lines = res.lines.map((l) => ({ time: Math.round(l.time), beat_length: l.beat_length, meter: l.meter }));
   songFile = file;
+  songCopy = keep ? await reading.then((ab) => new Blob([ab], { type: file.type }), () => null) : null;
   serverLines = JSON.parse(JSON.stringify(lines));
   $("send-fix").disabled = false;
   $("send-fix").textContent = "send fix";
@@ -804,13 +809,16 @@ $("send-fix").onclick = async () => {
   b.textContent = "sending…";
   const form = new FormData();
   form.append("timing", JSON.stringify({ original: serverLines, fixed: JSON.parse(plain(lines)), file: fileName, note }));
-  form.append("file", songFile);
+  form.append("file", songCopy || songFile, songFile.name);
   let res;
-  try {
-    const r = await fetch("api/feedback", { method: "POST", body: form });
-    res = await r.json().catch(() => ({ error: `server error ${r.status}` }));
-  } catch (e) {
-    res = { error: "can't reach the server" };
+  for (let tries = 2; tries--;) {  // one more try if the connection broke
+    try {
+      const r = await fetch("api/feedback", { method: "POST", body: form });
+      res = await r.json().catch(() => ({ error: `server error ${r.status}` }));
+      break;
+    } catch (e) {
+      res = { error: "can't reach the server: try send fix again in a minute" };
+    }
   }
   if (res.ok) { b.textContent = "sent, thanks!"; b.classList.add("sent"); renderFix(); return; }
   b.disabled = false;
