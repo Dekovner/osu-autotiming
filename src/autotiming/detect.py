@@ -944,6 +944,7 @@ def bar_allowed(o: Onsets, times: np.ndarray, phys: list[Segment], anchor: float
 
 
 STEADY_DOWNBEATS = _env("STEADY_DOWNBEATS", "1") == "1"
+DROP_AFTER_END = _env("DROP_AFTER_END", "1") == "1"  # red lines that start after the last onset go
 
 
 def steady_downbeats(o: Onsets, segs: list[Segment], anchor: float | None, ch) -> list[Segment]:
@@ -1051,11 +1052,12 @@ def splice(steady: list[Segment], hyb: list[Segment], spans) -> list[Segment]:
         and src's lines are on "1": restarting on any other beat put every later "1" a beat or
         more off (heavy bars 79.7% -> 70.4% when splicing came in). No restart when src's own next
         line comes first or within a bar of the seam: that line opens the part, on "1" already (the
-        restart overtook a 222 at 03:56:773 and dropped it, ranked 2403854). An own line under a bar
-        before hi is a stub the next part takes over (150 26 ms before a tracked span, same map)."""
+        restart overtook a 222 at 03:56:773 and dropped it, ranked 2403854). An own line under a beat
+        before hi is a stub the next part takes over (150 26 ms before a tracked span, same map); a
+        bar-long ramp step stays (site fix 699310c2: 166.66 at 02:07:781, 0.9 s before the seam)."""
         src = sorted(src, key=lambda x: x.time)
         starts = [x.time for x in src]
-        own = [x for x in src if lo < x.time < hi and (hi == np.inf or hi - x.time >= x.meter * x.beat_length)]
+        own = [x for x in src if lo < x.time < hi and hi - x.time >= x.beat_length]
         out = []
         if lo > -np.inf:
             a = src[max(0, int(np.searchsorted(starts, lo, side="right")) - 1)]
@@ -1219,6 +1221,9 @@ def detect_full(o: Onsets, pcm=None, sr=None, downbeat_ms: float | None = None, 
             info.pop("octave_doubt", None)
     if plain and STEADY_DOWNBEATS:
         segs = steady_downbeats(o, segs, anchor, ch)
+    if DROP_AFTER_END:  # nothing left to time: a seam at the song's last beat (site fix 699310c2, 02:54:040)
+        last = o.times[-1] + OSU_OFFSET_MS
+        segs = [s for k, s in enumerate(sorted(segs, key=lambda s: s.time)) if k == 0 or s.time <= last]
     segs = connect_lines(snap_bpm(first_on_downbeat(segs, anchor, ch, o), o.times[-1] + OSU_OFFSET_MS))
     if refine and REFINE_JUNK and pcm is not None:
         segs = refine_junk(o, pcm, sr, segs)

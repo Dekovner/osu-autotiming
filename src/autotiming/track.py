@@ -359,6 +359,11 @@ def _runs(mask: np.ndarray, min_run: int) -> np.ndarray:
 RUN_TREES = Path(_env("RUN_TREES", Path(__file__).resolve().parent / "models" / "run_trees.npz"))
 RUN_TREE_THR = float(_env("RUN_TREE_THR", "0.7"))  # a run the rule rejects is taken at this P
 RUN_TREE_LO = float(_env("RUN_TREE_LO", "0.3"))  # one the rule takes is dropped below this P
+# ...unless it only wobbles around the steady tempo (4-beat average within this, same tempo on both
+# sides): then the rule's word is not enough, the trees must take it at RUN_TREE_THR. Mappers do
+# follow such drift (tracker better on 651 of 924 such runs), but not where the trees doubt it:
+# 13 rule-only runs, tracker worse on 8 (site fix 699310c2: 172 / 169.6 lines on a loose outro at 170)
+RUN_WOBBLE_DEV = float(_env("RUN_WOBBLE_DEV", "0.02"))  # 0: off
 RUN_LOG = None
 
 
@@ -550,7 +555,9 @@ def hybrid(o, steady: list[Segment], tracked: Beats, margin=HYBRID_MARGIN, third
             RUN_LOG.append({"a": float(sb[k] - L[k] / 2), "b": float(sb[k2 - 1] + L[k2 - 1] / 2), "rule": float(accept), **feats})
         if run_model() is not None:  # the trees overrule the rule only when sure of it
             pk = run_keep_prob(feats)
-            accept = pk >= RUN_TREE_THR or (accept and pk >= RUN_TREE_LO)
+            # a run wobbling around the tempo it started and ends in only stays if the trees are sure
+            wobble = feats["dev"] < RUN_WOBBLE_DEV and feats["net"] < 0.01 and feats["net_steady"] < 0.005
+            accept = pk >= RUN_TREE_THR or (accept and not wobble and pk >= RUN_TREE_LO)
         if not accept:
             use_t[k:k2] = False
         elif k2 >= len(use_t) - RUN_END_BEATS:  # no steady tempo left to go back to: the run ends the song
