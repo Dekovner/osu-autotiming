@@ -309,9 +309,10 @@ function applyTaps() {
   const prior = savedLag(), est = tapLag(tapPasses, hits, prior);
   const lag = est ? est.lag : prior ?? 0, jitter = est ? est.jitter : 15;  // real ms: times the speed below
   const placed = placeTaps(raw, hits, lag * rate, jitter * rate);
-  const beats = placed.beats.slice().sort((a, b) => a - b);
+  const order = placed.beats.map((_, k) => k).sort((a, b) => placed.beats[a] - placed.beats[b]);
+  const beats = order.map((k) => placed.beats[k]);
   commit();
-  lines = spliceTaps(lines, beats);
+  lines = spliceTaps(lines, beats, order.map((k) => placed.locked[k]), jitter * rate);
   sel = lines.findIndex((l) => l.time === Math.round(beats[0]));
   refresh();
   if (est && est.n >= TAP_LAG_KEEP) {

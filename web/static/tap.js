@@ -14,7 +14,9 @@
 // stretches of 250 heavy ranked maps (taps = beat + lag + jitter): with the lag known, beats within
 // 10 ms of the meant ones go from 80% to 86% at 8 ms of jitter and from 52% to 68% at 15 ms (on a
 // clear hit: 91%, 82%). The lag estimate is a few ms off the true one (median) and misses by over
-// 15 ms on 7-12% of a visitor's first songs, 6% once their lag on earlier songs is known.
+// 15 ms on 7-12% of a visitor's first songs, 6% once their lag on earlier songs is known. The beats
+// then get red lines the way the mapper drew them (tapLines): 0.96-1.1x as many as the mapper's on
+// those stretches (a line per tap was 2.7x), 91-93% at a round BPM, the beats' fit about the same.
 
 const TAP_LATE_MAX = 150;     // ms of real time a visitor's taps may run late
 const TAP_EARLY_MAX = 60;     // or early: taps run ahead of the music by a little at most, and a shift
@@ -29,7 +31,11 @@ const TAP_SEARCH_MS = 30;     // hits further from a tap than this are never its
 const TAP_REACH = [0.3, 2];   // a hit of local rank r (0.5..1) is in reach at jitter * (0.3 + 2 r)
 const TAP_KINK = 0.5;         // a lock may bend the beats by at most this much jitter more than the taps did
 const TAP_RELAX = 0.5;        // a tap with no hit moves this far toward the middle of its neighbours
-const TAP_LINE_TOL = 2;       // ms: beats this close to one red line's grid share it
+const TAP_LINE_COST = 6;      // a new red line must buy this much fit (tapLines)
+const TAP_LOCKED_SLACK = 2;   // ms: a beat on its hit may sit this far off its line per unit of that cost
+const TAP_LOCKED_MAX = 4;     // ms: and never further
+const TAP_LINE_BEATS = 64;    // the longest line tried
+const TAP_SNAP_STEPS = [1, 0.5, 0.25, 0.1];  // BPM roundings mappers use, roundest first (detect.SNAP_STEPS)
 const TAP_TAKEOVER_MS = 40;   // the last tap this close to a beat of the old grid hands over on that beat
 
 const tapMedian = (a) => {
@@ -134,23 +140,49 @@ function dedupeTaps(taps) {
   return s.filter((x, i) => i === 0 || x - s[i - 1] > 0.4 * gap);
 }
 
-// as few red lines as keep every beat within TAP_LINE_TOL ms of its line's grid; times in whole
-// ms, each line's beat from its own start to the next one's (so no double barlines). The last
-// beat is where the next timing takes over: it gets no line here
-function tapLines(beats, meter) {
-  const b = beats.map(Math.round), out = [];
-  let i = 0;
-  while (i < b.length - 1) {
-    let j = i + 1;
-    while (j + 1 < b.length) {
-      const L = (b[j + 1] - b[i]) / (j + 1 - i);
-      let ok = true;
-      for (let k = i + 1; k <= j && ok; k++) ok = Math.abs(b[i] + (k - i) * L - b[k]) <= TAP_LINE_TOL;
-      if (!ok) break;
-      j++;
+// red lines through the beats the way a mapper times free tempo: a new line only where the tempo
+// really moves, at a round BPM where it fits. Fewest lines by DP over lines running from beat to
+// beat: a line costs TAP_LINE_COST, a beat off its line (miss / slack)^2, the slack being
+// TAP_LOCKED_SLACK ms for a beat on its hit and the visitor's jitter for one placed by feel (it was
+// never more precise than that); a hit is never left more than TAP_LOCKED_MAX ms off its line, a
+// felt beat 1.5 jitters. Then each line takes the roundest BPM that keeps its beats that close, and
+// the next line starts where it lands (whole ms, so no double barlines). The last beat is where the
+// next timing takes over: it gets no line here, and the line before lands on it exactly
+function tapLines(beats, meter, locked = null, jitter = 8, cost = TAP_LINE_COST) {
+  const b = beats.map(Math.round), n = b.length;
+  const exact = (k) => !locked || locked[k] || k === n - 1;
+  const slack = (k) => (exact(k) ? TAP_LOCKED_SLACK : Math.max(TAP_LOCKED_SLACK, jitter));
+  const most = (k) => (exact(k) ? TAP_LOCKED_MAX : Math.max(TAP_LOCKED_MAX, 1.5 * jitter));
+  const best = new Float64Array(n).fill(Infinity), from = new Int32Array(n).fill(-1);
+  best[0] = 0;
+  for (let j = 1; j < n; j++) {
+    for (let i = j - 1; i >= Math.max(0, j - TAP_LINE_BEATS); i--) {
+      if (best[i] === Infinity) continue;
+      const L = (b[j] - b[i]) / (j - i);
+      let c = best[i] + cost * (exact(i) ? 1 : 1.5), ok = true;  // a line had better start on a hit
+      for (let k = i + 1; k < j && ok; k++) {
+        const miss = b[k] - b[i] - (k - i) * L;
+        ok = Math.abs(miss) <= most(k);
+        c += (miss / slack(k)) ** 2;
+      }
+      if (ok && c < best[j]) { best[j] = c; from[j] = i; }
     }
-    out.push({ time: b[i], beat_length: (b[j] - b[i]) / (j - i), meter });
-    i = j;
+  }
+  const cuts = [n - 1];
+  while (cuts[0] > 0) cuts.unshift(from[cuts[0]]);
+  const out = [];
+  let t = b[0];
+  for (let s = 0; s + 1 < cuts.length; s++) {
+    const i = cuts[s], j = cuts[s + 1], last = j === n - 1;
+    let L = (b[j] - t) / (j - i);
+    for (const step of last ? [] : TAP_SNAP_STEPS) {
+      const Lr = 60000 / (Math.round(60000 / L / step) * step);
+      let fits = true;
+      for (let k = i + 1; k <= j && fits; k++) fits = Math.abs(t + (k - i) * Lr - b[k]) <= most(k);
+      if (fits) { L = Lr; break; }
+    }
+    out.push({ time: t, beat_length: L, meter });
+    t = last ? b[j] : Math.round(t + (j - i) * L);
   }
   return out;
 }
@@ -160,8 +192,8 @@ function tapLines(beats, meter) {
 // beat if the last tap was that close to one, then (a short bar, if need be) on its next "1", so
 // the bars after the taps stay as they were; else from the last tap at the old tempo. An old
 // line under half a beat before the first tap was the same "1" and goes; a line of its own right
-// at the last tap takes over by itself
-function spliceTaps(lines, beats) {
+// at the last tap takes over by itself. locked (placeTaps) and jitter (song ms) go to tapLines
+function spliceTaps(lines, beats, locked = null, jitter = 8) {
   const ls = lines.slice().sort((a, b) => a.time - b.time);
   const b = beats.slice(), n = b.length, first = b[0], lastTap = b[n - 1];
   const inEffect = (t) => { let i = 0; while (i + 1 < ls.length && ls[i + 1].time <= t + 0.5) i++; return ls[i]; };
@@ -192,7 +224,7 @@ function spliceTaps(lines, beats) {
   b[n - 1] = end;
   const cutFrom = first - (before ? 0.5 * before.beat_length : 0);
   const kept = ls.filter((l) => l === own || l.time < cutFrom || l.time > end + 0.5);
-  const out = [...kept, ...tapLines(b, before ? before.meter : 4)];
+  const out = [...kept, ...tapLines(b, before ? before.meter : 4, locked, jitter)];
   for (const x of tail) if (!out.some((l) => Math.abs(l.time - x.time) < 1)) out.push(x);
   return out.sort((a, c) => a.time - c.time);
 }

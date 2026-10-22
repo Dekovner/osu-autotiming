@@ -39,7 +39,8 @@ lines on a waveform editor:
 - paste timing points (ctrl+v) or drop an .osu to compare with an existing map's red lines
 - **tap mode** for stretches with no steady tempo (rubato, a live intro, fermatas): play and hit z / x on
   every beat. Your lag is measured against the song's clear hits, each tap moves onto the hit it was aimed
-  at, and the taps become the red lines from the first to the last; the timing after them carries on.
+  at, and the taps get red lines the way a mapper draws them (a new one only where the tempo moves, at a
+  round BPM where it fits) from the first tap to the last; the timing after them carries on.
   You decide where the beats are, the page only makes them precise
 - **send fix**: the song and your corrected timing go to the bench set, which is how the detector learns what it gets wrong
 
