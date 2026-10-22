@@ -1812,6 +1812,22 @@ class Timing:
     downbeat_alt: int | None = None  # the second guess at "1", in beats after the chosen one (1..3)
     octave_alts: list[dict] | None = None  # {"lines": indices into segments, "factor"}: x2 / x0.5 in doubt
     triplet_alt: list[Segment] | None = None  # a song in 3: the other reading (waltz vs 4/4 in triplets), whole
+    hits: tuple[np.ndarray, np.ndarray] | None = None  # clear_hits(): what the editor's tap mode locks taps onto
+
+
+HIT_RANK_MS = 1000.0  # a hit's strength is ranked among the onsets this close to it
+
+
+def clear_hits(o: Onsets) -> tuple[np.ndarray, np.ndarray]:
+    """Onsets in the top half by strength among their neighbours within HIT_RANK_MS: osu! times and
+    that local rank (0.5..1). The editor's tap mode measures a visitor's lag against them and puts
+    each tap on the one it was aimed at: a beat is on a hit that stands out locally, whatever the
+    loudness of the passage."""
+    t, s = o.times, o.strength
+    lo, hi = np.searchsorted(t, t - HIT_RANK_MS), np.searchsorted(t, t + HIT_RANK_MS)
+    rank = np.array([(s[a:b] < s[k]).mean() for k, (a, b) in enumerate(zip(lo, hi))])
+    keep = rank >= 0.5
+    return t[keep] + OSU_OFFSET_MS, rank[keep]
 
 
 def analyze(path, downbeat_ms: float | None = None, decoded: tuple[np.ndarray, int] | None = None) -> Timing:
@@ -1826,7 +1842,7 @@ def analyze(path, downbeat_ms: float | None = None, decoded: tuple[np.ndarray, i
     segs = detect_full(o, pcm, sr, downbeat_ms, info)
     alt = [Segment(s.time + s.beat_length / 2, s.beat_length, s.meter) for s in segs]
     bars = dict(downbeat_uncertain=info.get("downbeat_unsure", False), downbeat_alt=info.get("downbeat_alt"),
-                octave_alts=info.get("octave_alts") or [], triplet_alt=info.get("triplet_alt"))
+                octave_alts=info.get("octave_alts") or [], triplet_alt=info.get("triplet_alt"), hits=clear_hits(o))
     if info.get("phase_keep") is not None:
         p = info["phase_keep"]
         return Timing(segs, phase_uncertain=PHASE_UNSURE[0] < p < PHASE_UNSURE[1], alt_segments=alt, **bars)

@@ -22,6 +22,8 @@ let playing = false, playCtx0 = 0, playPos0 = 0, source = null, rate = 1, cursor
 let metroNext = 0, phaseUncertain = false, fileName = "", firstRef = 0;  // firstRef: the server's first line
 let songFile = null, songCopy = null, serverLines = [];  // what "send fix" sends along with the edited lines
 let hoverT = null;  // pointer position on the waveform (osu ms), for the readout
+// tap mode (tap.js): taps of the pass being played, the song's passes so far (for the lag) and its clear hits
+let tapOn = false, taps = [], tapPasses = [], hits = null;
 
 // ---------- time & grid helpers ----------
 
@@ -249,6 +251,78 @@ function deleteSel() {
   refresh();
 }
 
+// ---------- tap mode ----------
+// For stretches with no steady tempo (rubato, a live intro, fermatas): play and hit z / x on
+// every beat; a stop turns the taps into red lines in place of the timing from the first tap to
+// the last (tap.js). The lag of a visitor's taps is measured against the song's clear hits over
+// all of this song's passes, and kept (localStorage) as the starting guess for the next song.
+
+const TAP_LAG_KEY = "timing-tap-lag";
+const TAP_LAG_KEEP = 12;  // taps that found their hit before a lag is worth keeping for the next song
+
+function savedLag() {
+  try {
+    const v = JSON.parse(localStorage.getItem(TAP_LAG_KEY) || "null");
+    return Number.isFinite(v) ? v : null;
+  } catch (e) { return null; }
+}
+
+// the lag (song ms at the current speed) known before this pass: this song's passes, else the last
+// song's; worked out once per pass (draw() asks every frame)
+let tapGuess = null;
+function tapLagGuess() {
+  if (tapGuess === null) {
+    const est = tapPasses.length ? tapLag(tapPasses, hits, savedLag()) : null;
+    tapGuess = est ? est.lag : savedLag() ?? 0;
+  }
+  return tapGuess * rate;
+}
+
+// the song time being heard when the key went down: the output timestamp ties the event's clock to
+// the audio clock, the output's own latency included; without it, the audio clock less outputLatency
+function tapTime(e) {
+  let ctxT = actx.currentTime - (actx.outputLatency || actx.baseLatency || 0);
+  if (actx.getOutputTimestamp) {
+    const ts = actx.getOutputTimestamp();
+    if (ts.performanceTime > 0) ctxT = ts.contextTime + (e.timeStamp - ts.performanceTime) / 1000;
+  }
+  return playPos0 + (ctxT - playCtx0) * 1000 * rate;
+}
+
+function setTap(on) {
+  if (on === tapOn) return;
+  tapOn = on;
+  $("tap").classList.toggle("on", on);
+  metroNext = now();
+  if (on) status("tap mode: play and hit z or x on every beat, then stop (space): the taps become red lines from the " +
+    "first to the last. Slower speed, more precise taps. t leaves tap mode");
+  else if (taps.length) applyTaps();  // its status says what came of them
+  else status("");
+}
+
+function applyTaps() {
+  const raw = dedupeTaps(taps);
+  taps = [];
+  if (raw.length < 2) { status("tap mode: red lines need at least two taps", true); return; }
+  tapPasses.push({ taps: raw, rate });
+  tapGuess = null;
+  const prior = savedLag(), est = tapLag(tapPasses, hits, prior);
+  const lag = est ? est.lag : prior ?? 0, jitter = est ? est.jitter : 15;  // real ms: times the speed below
+  const placed = placeTaps(raw, hits, lag * rate, jitter * rate);
+  const beats = placed.beats.slice().sort((a, b) => a - b);
+  commit();
+  lines = spliceTaps(lines, beats);
+  sel = lines.findIndex((l) => l.time === Math.round(beats[0]));
+  refresh();
+  if (est && est.n >= TAP_LAG_KEEP) {
+    try { localStorage.setItem(TAP_LAG_KEY, JSON.stringify(Math.round(est.lag * 10) / 10)); } catch (e) { /* private mode */ }
+  }
+  const onHits = placed.locked.filter(Boolean).length;
+  // lag = hit - tap: taps before their hits run early
+  status(`tapped ${raw.length} beats, ${onHits} put on the hit they aimed at; your taps run ${Math.abs(Math.round(lag))} ms ` +
+    `${lag > 0 ? "early" : "late"}${est ? "" : " (a guess: tap more beats)"} (ctrl+z undoes it)`);
+}
+
 // ---------- output ----------
 
 function timingText() {
@@ -396,7 +470,8 @@ function draw() {
     g.fillStyle = i === sel ? "#f04b3c" : "#f04b3cbb";
     g.beginPath(); g.moveTo(x - 6, 0); g.lineTo(x + 6, 0); g.lineTo(x, 9); g.fill();
     g.fillStyle = "#ecebf1";
-    g.fillText(`${fmtBpm(bpmOf(l))} · ${l.meter}/4`, x + 5, 22);
+    const label = `${fmtBpm(bpmOf(l))} · ${l.meter}/4`;  // where the next line leaves room (a tapped stretch has one a beat)
+    if (i + 1 >= lines.length || xOf(lines[i + 1].time, w) - x > g.measureText(label).width + 10) g.fillText(label, x + 5, 22);
     const j = joint(i);
     if (accidental(j) && j.land > t0 && j.land < t1) {  // where this grid wanted the next line
       const xl = xOf(j.land, w);
@@ -404,6 +479,16 @@ function draw() {
       g.beginPath(); g.moveTo(xl, 0); g.lineTo(xl, h); g.stroke(); g.setLineDash([]);
     }
   });
+  // taps of the pass being played, moved by the lag known so far so they show where they'll go
+  if (taps.length) {
+    const lag = tapLagGuess();
+    g.strokeStyle = "#e8c547"; g.lineWidth = 2;
+    for (const t of taps) {
+      const x = Math.round(xOf(t + lag, w)) + 0.5;
+      if (x < -2 || x > w + 2) continue;
+      g.beginPath(); g.moveTo(x, h * 0.62); g.lineTo(x, h); g.stroke();
+    }
+  }
   // pointer
   if (hoverT !== null) {
     const xh = Math.round(xOf(hoverT, w)) + 0.5;
@@ -487,6 +572,7 @@ function pause() {
   for (const n of clicks) { try { n.stop(); } catch (e) { /* not started or done */ } }
   clicks = [];
   setPlayButton(false);
+  if (taps.length) applyTaps();  // any stop ends a pass (a seek or a speed change too)
   draw();
 }
 function seek(t) {
@@ -521,7 +607,7 @@ function click(when, accent) {
   o.onended = () => { clicks = clicks.filter((x) => x !== o); };
 }
 function scheduleMetronome() {
-  if (!$("metro").checked) { metroNext = now(); return; }
+  if (!$("metro").checked || tapOn) { metroNext = now(); return; }  // clicks of the old grid would lead the taps
   const until = now() + 90 * rate;  // look ahead a little: the rAF loop runs every ~16 ms
   for (const tk of ticks(metroNext, until, 1)) {
     const when = playCtx0 + (tk.t - playPos0) / (1000 * rate);
@@ -687,6 +773,10 @@ async function load(file) {
   decodeShift = buffer ? alignDecode(b64(res.env.data, Uint8Array)) : 0;
   AUDIO_LAG = res.audio_lag_ms ?? 20.4;
   phaseUncertain = res.phase_uncertain;
+  hits = res.hits ? { t: Float64Array.from(new Int32Array(b64(res.hits.t, Uint8Array).buffer), (x) => x / 10),
+    r: Float64Array.from(b64(res.hits.r, Uint8Array), (x) => 0.5 + x / 510) } : null;
+  taps = []; tapPasses = []; tapOn = false; tapGuess = null;
+  $("tap").classList.remove("on");
   past = []; future = [];
   lines = res.lines.map((l) => ({ time: Math.round(l.time), beat_length: l.beat_length, meter: l.meter }));
   songFile = file;
@@ -746,6 +836,8 @@ function showNotes(res) {
   if (!notes.length) notes.push("red lines sit on guessed downbeats (the high click): if \"1\" is elsewhere, press all −1 / all +1 above the red lines.");
   const box = $("notes");
   box.innerHTML = notes.map((n) => `<p>${n}</p>`).join("") +
+    `<p class="fix-note">no steady tempo somewhere (rubato, a live intro)? <button id="to-tap">tap it in</button>: ` +
+    "play it and hit z / x on every beat, your taps become the red lines there.</p>" +
     `<p class="fix-note">wrong somewhere? fix it here, then <button id="to-fix">send fix ↓</button>: ` +
     "the song and your timing go to auneu, and the songs it gets wrong are what makes it better.</p>";
   box.classList.toggle("unsure", !!(res.downbeat_uncertain && beats) || phaseUncertain || octs.length > 0 || tri.length > 0);
@@ -756,6 +848,7 @@ function showNotes(res) {
     b.textContent = done ? "done (ctrl+z undoes it)" : "those red lines are gone";
   }));
   $("to-fix").onclick = () => $("send-fix").scrollIntoView({ behavior: "smooth", block: "center" });
+  $("to-tap").onclick = (e) => { setTap(true); e.currentTarget.blur(); $("wave").scrollIntoView({ behavior: "smooth", block: "center" }); };
   const t = $("tri-alt");
   if (t) t.onclick = () => {
     commit();
@@ -763,7 +856,7 @@ function showNotes(res) {
     setLines(tri, false);
     firstRef = tri[0].time;
     // the other notes' buttons were about the reading the server picked
-    $("notes").querySelectorAll("button:not(#to-fix)").forEach((x) => (x.disabled = true));
+    $("notes").querySelectorAll("button:not(#to-fix):not(#to-tap)").forEach((x) => (x.disabled = true));
     t.textContent = "done (ctrl+z undoes it)";
   };
   const b = $("db-alt");
@@ -789,6 +882,7 @@ const dropZones = [$("drop"), document.querySelector(".out")];
 document.addEventListener("drop", (e) => openFiles([...e.dataTransfer.files]));
 
 $("play").onclick = () => (playing ? pause() : play());
+$("tap").onclick = (e) => { setTap(!tapOn); e.currentTarget.blur(); };  // focused, space would press it again
 $("rate").onchange = (e) => { rate = +e.target.value; if (playing) { pause(); play(); } };
 $("div").onchange = draw;
 $("metro").onchange = () => { metroNext = now(); };
@@ -850,7 +944,7 @@ function pasteTiming(text, from = null) {
   setLines(got, false);
   firstRef = got[0].time;
   // the notes' buttons are about the analysis, not this timing
-  $("notes").querySelectorAll("button:not(#to-fix)").forEach((b) => (b.disabled = true));
+  $("notes").querySelectorAll("button:not(#to-fix):not(#to-tap)").forEach((b) => (b.disabled = true));
   status(`${from ? "took" : "pasted"} ${got.length} red line${got.length > 1 ? "s" : ""}${from ? ` from ${from}` : ""} (ctrl+z undoes it)`);
 }
 $("paste").onclick = async () => {
@@ -996,6 +1090,11 @@ document.addEventListener("keydown", (e) => {
   if (k === " ") { e.preventDefault(); playing ? pause() : play(); }
   else if ((e.ctrlKey || e.metaKey) && k === "z") { e.preventDefault(); e.shiftKey ? redo() : undo(); }
   else if ((e.ctrlKey || e.metaKey) && k === "y") { e.preventDefault(); redo(); }
+  else if ((k === "z" || k === "x") && tapOn && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    if (!playing) status("tap mode: start the song (space), then tap the beats on z / x");
+    else if (!e.repeat) { taps.push(tapTime(e)); draw(); }
+  }
+  else if (k === "t") setTap(!tapOn);
   else if (k === "delete" || k === "backspace") deleteSel();
   else if (k === "a") addLineAt(now());
   else if (k === "b") barHere(now());

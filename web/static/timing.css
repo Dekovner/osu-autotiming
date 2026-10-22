@@ -89,6 +89,9 @@ select { padding: 2px 4px; font-family: var(--mono); font-size: 0.78rem; }
 .bar .play .ico { width: 1.1em; text-align: center; font-size: 0.7rem; color: var(--don); }
 .bar .play:hover { background: var(--faint); border-color: #ffffff55; color: var(--ink); }
 .bar .play.on { background: #f04b3c14; border-color: #f04b3c70; }
+/* tap mode: outlined like play, lit in the colour of the taps on the waveform while it's on */
+.bar .tap { padding: 3px 9px; border: 1px solid #ffffff2e; border-radius: 4px; color: var(--ink); font-size: 0.8rem; }
+.bar .tap.on { background: #e8c54722; border-color: #e8c547aa; color: #e8c547; }
 .bar input[type=range] { width: 84px; accent-color: var(--don); }
 .bar .hover { display: inline-block; width: 10ch; white-space: nowrap; color: var(--kat); font-size: 0.85rem; }
 

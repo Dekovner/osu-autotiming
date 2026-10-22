@@ -11,7 +11,8 @@ GET /job/<id>
       "octave_alts": [{"lines": [index...], "factor": 2 | 0.5}] red lines whose tempo is in doubt,
       "triplet_alt": [lines] a song in 3 read the other way (waltz vs 4/4 in triplets), or [],
       "duration_ms", "audio_lag_ms", "wave": {"ms_per_px": 1, "min": base64 int8, "max": base64 int8},
-      "env": {"ms": 1, "data": base64 uint8}, "seconds"}
+      "env": {"ms": 1, "data": base64 uint8}, "hits": {"t": base64 int32 LE, osu ms x 10,
+      "r": base64 uint8, 0..255 = local strength rank 0.5..1} (the clear hits tap mode locks onto), "seconds"}
 POST /feedback  (multipart: file=<audio>, timing={"original": lines, "fixed": lines, "file", "note"})
   -> {"ok": true}   a visitor's corrected timing, kept with the song in FEEDBACK_DIR
 
@@ -153,6 +154,9 @@ def analyse(path: str, downbeat_ms: float | None, max_minutes: float, marathon_m
     except NoRhythmError:
         return {"error": "no rhythm found in that audio (silence or a drone?)"}
     seg = lambda ss: [{"time": s.time, "beat_length": s.beat_length, "meter": s.meter} for s in ss]
+    ht, hr = r.hits if r.hits is not None else (np.zeros(0), np.zeros(0))
+    hits = {"t": base64.b64encode(np.round(ht * 10).astype("<i4").tobytes()).decode(),
+            "r": base64.b64encode(np.clip(np.round((hr - 0.5) * 510), 0, 255).astype(np.uint8).tobytes()).decode()}
     return {
         "lines": seg(r.segments),
         "phase_uncertain": bool(r.phase_uncertain),
@@ -165,6 +169,7 @@ def analyse(path: str, downbeat_ms: float | None, max_minutes: float, marathon_m
         "audio_lag_ms": -OSU_OFFSET_MS,  # a red line at t times the attack at t + this in the decode
         "wave": {"ms_per_px": 1, "min": q(mn), "max": q(mx)},
         "env": {"ms": 1, "data": env},
+        "hits": hits,  # tap mode locks taps onto these
         "seconds": time.time() - t0,
     }
 

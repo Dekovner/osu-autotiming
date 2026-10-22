@@ -16,7 +16,7 @@
 <meta property="og:image:height" content="630">
 <meta name="twitter:card" content="summary_large_image">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="timing.css?v=16">
+<link rel="stylesheet" href="timing.css?v=17">
 </head>
 <body>
 <div class="intro">
@@ -41,6 +41,7 @@
   <div id="notes" class="notes mono" hidden></div>
   <div class="bar mono">
     <button id="play" class="play" title="play / pause (space)"><span class="ico">▶</span> <span class="lbl">play</span></button>
+    <button id="tap" class="tap" title="tap mode (t): play and hit z / x on every beat; a stop turns the taps into red lines, for stretches with no steady tempo">tap</button>
     <span id="clock" class="clock">00:00:000</span>
     <span id="hover" class="hover" title="where the pointer is on the waveform"></span>
     <span class="sep"></span>
@@ -55,7 +56,7 @@
     <label title="music volume">music <input id="vol-music" type="range" min="0" max="100" value="70"></label>
     <label title="metronome volume">click <input id="vol-click" type="range" min="0" max="200" value="100"></label>
     <span class="sep"></span>
-    <span class="hint">space play · wheel zoom · drag pan · click seek · drag a red line to move it</span>
+    <span class="hint">space play · t tap · wheel zoom · drag pan · click seek · drag a red line to move it</span>
   </div>
 
   <canvas id="wave" class="wave"></canvas>
@@ -122,6 +123,7 @@
   </div>
 </section>
 
-<script src="app.js?v=30"></script>
+<script src="tap.js?v=1"></script>
+<script src="app.js?v=31"></script>
 </body>
 </html>
