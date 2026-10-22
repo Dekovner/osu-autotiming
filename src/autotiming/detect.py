@@ -1027,7 +1027,7 @@ def combine(o: Onsets, steady: list[Segment], tracked, anchor: float | None = No
 # exactly as they were. Compressing the whole song's beats again (lines() with its line cost) merged
 # steady sections a few tenths of a BPM apart: one tracked run at 8-21 s of a song timed in 18 steady
 # lines (2007015, 3 mapsets) left 3 lines and a 75 ms error.
-COMBINE_KEEP_STEADY = _env("COMBINE_KEEP_STEADY", "0") == "1"  # off: refine_junk re-cuts its runs from the lines around them, and on the site song (2fc1491c) the spliced lines move its 100 BPM section by half a beat
+COMBINE_KEEP_STEADY = _env("COMBINE_KEEP_STEADY", "1") == "1"
 
 
 def splice(steady: list[Segment], hyb: list[Segment], spans) -> list[Segment]:
@@ -1235,6 +1235,50 @@ def junk_runs(segs: list[Segment]) -> list[tuple[int, int]]:
     return runs
 
 
+JUNK_SECTION_MIN_BEATS = 8
+
+
+def junk_sections(pcm, sr, new: list[Segment], start: float, end: float, score) -> list[Segment]:
+    """A run re-detected as several sections: each one of JUNK_SECTION_MIN_BEATS+ beats is also
+    re-detected alone, and takes that octave and phase if the run's onsets fit at least as well.
+    A run that spans a section and the next one's ramp (the site song's 100 BPM at 04:58:760 and
+    its 62 -> 1400 gimmick after it) otherwise times the section by the whole slice's octave."""
+    out = list(new)
+    for k, s in enumerate(new):
+        e = new[k + 1].time if k + 1 < len(new) else end
+        if (e - s.time) / s.beat_length < JUNK_SECTION_MIN_BEATS:
+            continue
+        a, b = s.time - OSU_OFFSET_MS, e - OSU_OFFSET_MS
+        x = pcm[int(a / 1000 * sr):int(b / 1000 * sr)]
+        ox = onsets(x, sr)
+        if len(ox.times) < MIN_ONSETS:
+            continue
+        ox = replace(ox, strength=np.minimum(ox.strength, np.quantile(ox.strength, JUNK_CLIP_Q)))
+        try:
+            alone = detect_full(ox, x, sr, refine=False)
+        except NoRhythmError:
+            continue
+        if len(alone) != 1:
+            continue
+        L = alone[0].beat_length
+        f = min((0.5, 1.0, 2.0), key=lambda f: abs(np.log(s.beat_length * f / L)))
+        if abs(np.log(s.beat_length * f / L)) > 0.01:  # another tempo, not this section's octave
+            continue
+        t0 = alone[0].time + a
+        n = np.round((s.time - t0) / (L / 2))  # on its beat nearest the section's start, as for one section
+        new_k = Segment(t0 + n * L / 2, L, s.meter)
+        if k == 0:  # the run's first section starts on its own beat nearest where the run began
+            new_k = Segment(new_k.time - np.floor((new_k.time - start + L / 2) / L) * L, L, s.meter)
+        # the octave is the octave model's call on the section alone (the onset score below favours
+        # the denser grid: its quarters catch sixteenths); the score only checks the phase, both
+        # grids at the finer of the two tempos
+        fine = lambda x: Segment(x.time, min(x.beat_length, s.beat_length), x.meter)
+        cand = out[:k] + [new_k] + out[k + 1:]
+        if score(out[:k] + [fine(new_k)] + out[k + 1:]) >= score(out[:k] + [fine(s)] + out[k + 1:]):
+            out = cand
+    return out
+
+
 def refine_junk(o: Onsets, pcm, sr, segs: list[Segment]) -> list[Segment]:
     for i, j in reversed(junk_runs(segs)):  # back to front: earlier indices stay valid
         a, b = segs[i].time - OSU_OFFSET_MS, segs[j].time - OSU_OFFSET_MS  # audio clock
@@ -1261,6 +1305,8 @@ def refine_junk(o: Onsets, pcm, sr, segs: list[Segment]) -> list[Segment]:
         w = np.minimum(w, np.quantile(w, JUNK_CLIP_Q))
         clock = lambda ss: [Segment(s.time - OSU_OFFSET_MS, s.beat_length) for s in ss]
         score = lambda ss: np.mean([piecewise_excess(t, w, clock(ss), subdiv=k) for k in JUNK_SUBDIVS])
+        if len(new) >= 2:
+            new = junk_sections(pcm, sr, new, segs[i].time, segs[j].time, score)
         if len(new) < j - i and score(new) >= score(segs[i:j]):
             segs = segs[:i] + new + segs[j:]
     return connect_lines(segs)
