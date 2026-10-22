@@ -192,6 +192,55 @@ function addLineAt(t, e = null) {
   refresh();
 }
 
+// "1" here: a red line on the beat of the current grid nearest t, same BPM and meter, so the bar
+// restarts there (a bar of 2 or 6 in a song of 4s); whatever the snap divisor is
+function barHere(t) {
+  if (!lines.length) return;
+  const l = lines[lineAt(t)];
+  const time = Math.round(l.time + Math.round((t - l.time) / l.beat_length) * l.beat_length);
+  if (lines.some((x) => Math.abs(x.time - time) < 1)) { status("that beat already starts a bar"); return; }
+  commit();
+  const n = { time, beat_length: l.beat_length, meter: l.meter };
+  lines = [...lines, n].sort((x, y) => x.time - y.time);
+  sel = lines.indexOf(n);
+  refresh();
+}
+
+// a tempo ramp from the selected line to the next: a line every bar, the BPM stepping evenly (in
+// ratio) from this line's toward the next one's, the bars scaled to land exactly on the next line
+function rampToNext() {
+  if (sel < 0 || sel + 1 >= lines.length) { status("a ramp goes from the selected line to the next one: there is none after it", true); return; }
+  const a = lines[sel], b = lines[sel + 1], span = b.time - a.time, m = a.meter;
+  const beats = Math.round((2 * span) / (a.beat_length + b.beat_length));
+  const steps = Math.floor(beats / m);
+  if (steps < 2) { status("less than two bars to the next line: no room for a ramp", true); return; }
+  const per = Array.from({ length: steps }, (_, k) => (k + 1 < steps ? m : beats - m * (steps - 1)));
+  const len = per.map((_, k) => a.beat_length * Math.pow(b.beat_length / a.beat_length, k / steps));
+  const scale = span / per.reduce((acc, n, k) => acc + n * len[k], 0);
+  const times = [a.time];
+  per.forEach((n, k) => times.push(times[k] + n * len[k] * scale));
+  commit();
+  const ramp = per.map((n, k) => {
+    const t0 = Math.round(times[k]), t1 = k + 1 < steps ? Math.round(times[k + 1]) : b.time;
+    return { time: t0, beat_length: (t1 - t0) / n, meter: m };  // from the rounded times: no double barlines
+  });
+  lines = [...lines.slice(0, sel), ...ramp, ...lines.slice(sel + 1)];
+  refresh();
+  status(`ramp ${fmtBpm(bpmOf(a))} → ${fmtBpm(bpmOf(b))}: ${steps} lines, one a bar (ctrl+z undoes it)`);
+}
+
+// junk lines in a run: the ones after the selected line up to the playhead go, its grid carries on
+function deleteToPlayhead() {
+  if (sel < 0) return;
+  const t = now(), from = lines[sel].time;
+  const gone = lines.filter((l) => l.time > from && l.time <= t + 1).length;
+  if (!gone) { status("put the playhead after the lines to delete: every red line after the selected one up to it goes", true); return; }
+  commit();
+  lines = lines.filter((l) => !(l.time > from && l.time <= t + 1));
+  refresh();
+  status(`deleted ${gone} red line${gone > 1 ? "s" : ""} (ctrl+z undoes it)`);
+}
+
 function deleteSel() {
   if (sel < 0 || lines.length <= 1) return;
   commit();
@@ -729,6 +778,9 @@ $("vol-music").oninput = applyVolumes;
 $("vol-click").oninput = applyVolumes;
 $("add").onclick = () => addLineAt(now());
 $("del").onclick = deleteSel;
+$("bar-here").onclick = () => barHere(now());
+$("ramp").onclick = rampToNext;
+$("del-to").onclick = deleteToPlayhead;
 $("undo").onclick = undo;
 $("redo").onclick = redo;
 $("half").onclick = () => edit((l) => { l.beat_length *= 2; });
@@ -924,6 +976,7 @@ document.addEventListener("keydown", (e) => {
   else if ((e.ctrlKey || e.metaKey) && k === "y") { e.preventDefault(); redo(); }
   else if (k === "delete" || k === "backspace") deleteSel();
   else if (k === "a") addLineAt(now());
+  else if (k === "b") barHere(now());
   else if (k === "m") { $("metro").checked = !$("metro").checked; metroNext = now(); }
   else if (k === "arrowleft" || k === "arrowright") {
     e.preventDefault();

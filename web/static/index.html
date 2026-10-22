@@ -71,6 +71,7 @@
           <button id="all-back" title="move every red line half a beat earlier: the grid was on the offbeat">all −½</button>
           <button id="all-fwd" title="move every red line half a beat later: the grid was on the offbeat">all +½</button>
           <button id="add" title="add a red line at the playhead (a)">+ add</button>
+          <button id="bar-here" title="restart the bar on the beat nearest the playhead, same BPM (b): for a bar of 2 or 6 among 4s">1 here</button>
           <button id="undo" title="undo (ctrl+z)">undo</button>
           <button id="redo" title="redo (ctrl+shift+z)">redo</button>
         </span>
@@ -103,6 +104,11 @@
         <input id="f-meter" class="mono" inputmode="numeric">
         <span class="u mono">/4</span>
       </div>
+      <div class="field">
+        <span class="k mono">fix</span>
+        <button id="ramp" title="fill a tempo ramp from this line to the next: a line every bar, the BPM stepping evenly, landing exactly on the next line">ramp → next</button>
+        <button id="del-to" title="delete the red lines after this one up to the playhead: junk lines in a run, this line's grid carries on">delete → playhead</button>
+      </div>
       <p id="joint" class="joint mono" hidden></p>
     </div>
   </div>
@@ -116,6 +122,6 @@
   </div>
 </section>
 
-<script src="app.js?v=28"></script>
+<script src="app.js?v=29"></script>
 </body>
 </html>
