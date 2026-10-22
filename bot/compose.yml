@@ -30,6 +30,7 @@ services:
       - "127.0.0.1:8431:8431"   # localhost only
     volumes:
       - feedback:/data/feedback # songs + timings visitors fixed (bench/fetch_site.sh copies them out)
+      - usage:/data/usage       # usage.jsonl: a line per upload, refusal and fix (bench/fetch_usage.sh)
     cpus: 7.0               # all of it, marathon included: the host can't spare more (songs and a marathon share when busy)
     mem_limit: 6g           # stress test: 6 songs of 14.5 min 3.05 GB at most, a 37 min marathon 1.4 GB (60 min ~2.2)
     cap_drop: [ALL]         # strangers' files go through a native decoder in here
@@ -42,3 +43,4 @@ services:
 
 volumes:
   feedback:
+  usage:

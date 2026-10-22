@@ -14,6 +14,9 @@ GET /job/<id>
 POST /feedback  (multipart: file=<audio>, timing={"original": lines, "fixed": lines, "file", "note"})
   -> {"ok": true}   a visitor's corrected timing, kept with the song in FEEDBACK_DIR
 
+Every upload, refusal and fix also adds a line to USAGE_DIR/usage.jsonl (visitors as a salted
+hash of their IP): who uses the site outlives a redeploy, unlike the container's log.
+
 The waveform and the 1 ms energy envelope come from the BASS decode osu! uses,
 so the page can line its own (browser) decode up with osu! time. Songs wait
 in one queue (the page shows its place in it) and are analysed in API_WORKERS
@@ -72,6 +75,9 @@ FEEDBACK_PER_IP_PER_DAY = int(os.environ.get("FEEDBACK_PER_IP_PER_DAY", "10"))
 FEEDBACK_MAX_TOTAL = int(os.environ.get("FEEDBACK_MAX_TOTAL", str(3 << 30)))  # bytes kept at most, then refused
 FEEDBACK_MAX_LINES = 2000
 FEEDBACK_MAX_NOTE = 1000
+# one JSON line per upload, refusal and fix (who uses the site, and how), in a volume of its own so
+# a redeploy keeps it; visitors are a salted hash of their IP (bench/fetch_usage.sh, bench/usage.py)
+USAGE_DIR = Path(os.environ.get("USAGE_DIR", "/data/usage"))
 
 
 def _worker_init(threads: int = 1):
@@ -161,6 +167,24 @@ def analyse(path: str, downbeat_ms: float | None, max_minutes: float, marathon_m
     }
 
 
+def visitor(ip: str) -> str:
+    """The same visitor gives the same 12 hex digits; the salt never leaves the usage volume."""
+    salt = USAGE_DIR / ".salt"
+    if not salt.exists():
+        salt.write_text(secrets.token_hex(16))
+    return hashlib.sha256((salt.read_text().strip() + ip).encode()).hexdigest()[:12]
+
+
+def usage(ev: str, ip: str, **kw):
+    """Append one event to USAGE_DIR/usage.jsonl; a full disk or a missing volume never fails a request."""
+    try:
+        USAGE_DIR.mkdir(parents=True, exist_ok=True)
+        with (USAGE_DIR / "usage.jsonl").open("a") as f:
+            f.write(json.dumps({"t": round(time.time(), 1), "ev": ev, "who": visitor(ip), **kw}) + "\n")
+    except OSError as e:
+        log.warning("usage log: %s", e)
+
+
 class Limiter:
     def __init__(self, limit: int, window: float = 3600.0):
         self.limit, self.window, self.hits = limit, window, defaultdict(deque)
@@ -192,6 +216,7 @@ class Job:
         self.id = secrets.token_urlsafe(12)
         self.tmp, self.path, self.downbeat, self.ip = tmp, path, downbeat, ip
         self.status, self.result, self.done_at, self.marathon = "queued", None, None, False
+        self.seconds = None  # the upload's length as the probe read it
 
 
 def refusal(app, ip: str) -> tuple[int, str] | None:
@@ -227,8 +252,15 @@ def enqueue(app, job: Job, marathon: bool):
 
 async def handle_analyze(request: web.Request) -> web.Response:
     """Take the upload, queue it, answer at once with the job id and how many songs are ahead."""
-    app = request.app
     ip = request.headers.get("X-Real-IP") or request.remote or "?"
+    resp = await take_upload(request, ip)
+    if resp.status >= 400:  # turned away before the queue: the worker logs the rest
+        usage("refused", ip, status=resp.status, err=json.loads(resp.text).get("error"))
+    return resp
+
+
+async def take_upload(request: web.Request, ip: str) -> web.Response:
+    app = request.app
     if (r := refusal(app, ip)) is not None:
         return refuse(r)
     if not app["limiter"].allow(ip):
@@ -285,6 +317,7 @@ async def handle_analyze(request: web.Request) -> web.Response:
         tmp.cleanup()
         return refuse(r)
     job = Job(tmp, path, downbeat, ip)
+    job.seconds = seconds
     app["jobs"][job.id] = job
     enqueue(app, job, marathon)
     return web.json_response({"job": job.id, **position(app, job)})
@@ -380,6 +413,7 @@ async def handle_feedback(request: web.Request) -> web.Response:
         out.with_suffix(".tmp").write_text(json.dumps(rec))
         out.with_suffix(".tmp").replace(out)
         app["flimiter"].allow(ip)  # only fixes that were kept count
+        usage("fix", ip, song=d.name, audio=round(seconds, 1), lines=[len(original), len(fixed)], note=bool(note))
         log.info("fix received: %s (%d -> %d lines)%s", d.name, len(original), len(fixed), f": {note[:80]!r}" if note else "")
         return web.json_response({"ok": True})
     finally:
@@ -415,6 +449,13 @@ async def worker(app, marathon: bool = False):
         job.tmp.cleanup()
         log.info("%s from %s: %s", "marathon" if marathon else "job", job.ip,
                  r.get("error") or f"{len(r['lines'])} lines in {r['seconds']:.1f}s")
+        audio = round(job.seconds, 1) if job.seconds is not None else None
+        if "error" in r:
+            usage("job", job.ip, marathon=marathon, audio=audio, err=r["error"])
+        else:
+            usage("job", job.ip, marathon=marathon, audio=audio, lines=len(r["lines"]), secs=round(r["seconds"], 1),
+                  downbeat=job.downbeat is not None, doubt=[k for k, v in (("phase", r["phase_uncertain"]),
+                  ("downbeat", r["downbeat_uncertain"]), ("octave", r["octave_alts"])) if v])
 
 
 async def janitor(app):
