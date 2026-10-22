@@ -1229,6 +1229,14 @@ def detect_full(o: Onsets, pcm=None, sr=None, downbeat_ms: float | None = None, 
         segs = refine_junk(o, pcm, sr, segs)
     if refine and ch is not None:
         segs = section_phase(o, pcm, sr, ch.chroma, segs)
+    if refine and ch is not None and METER:
+        from .meter import apply_meter
+
+        mi = {}
+        segs = apply_meter(o, ch, segs, o.times[-1] + OSU_OFFSET_MS, OSU_OFFSET_MS, mi)
+        if info is not None and mi.get("meter") == 3:  # the "1" doubts were about bars of 4
+            for k in ("downbeat_unsure", "downbeat_alt"):
+                info.pop(k, None)
     if info is not None:
         info["octave_alts"] = octave_lines(segs, info.pop("octave_doubt", None), o.times[-1] + OSU_OFFSET_MS)
     return segs
@@ -1243,6 +1251,7 @@ def detect_full(o: Onsets, pcm=None, sr=None, downbeat_ms: float | None = None, 
 # ramp is not one grid, so it stays. Onset strengths are clipped at JUNK_CLIP_Q of the span: two
 # sound effects 10x louder than the music (05:03, 05:06) otherwise pull the lone grid to 122.75.
 REFINE_JUNK = _env("REFINE_JUNK", "1") == "1"
+METER = _env("METER", "1") == "1"  # bars of 3 when the song is in 3 (meter.apply_meter)
 JUNK_MAX_BEATS = 8.5  # a line covering up to two bars
 JUNK_MIN_LINES = 3
 JUNK_SUBDIVS = (1, 2, 4)

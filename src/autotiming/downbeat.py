@@ -107,8 +107,8 @@ def _mean_at(d: np.ndarray, sel: np.ndarray) -> float:
     return float(v.mean()) if len(v) else 0.0
 
 
-def bass_features(h: Harmony, beats: np.ndarray, first: int) -> dict:
-    """Bar-start evidence on beats[k] for k = first (mod 4): the bass changes note (1 and 2 beats
+def bass_features(h: Harmony, beats: np.ndarray, first: int, meter: int = 4) -> dict:
+    """Bar-start evidence on beats[k] for k = first (mod meter): the bass changes note (1 and 2 beats
     either side), bass and chords change between 2-bar phrases (on "1" of odd or even bars),
     and the bass gets louder. Bass change over 2 beats alone picks the mappers' "1" on 93%
     of ranked maps (bench/downbeat_exp.py), harmonic change over a bar 85%."""
@@ -116,7 +116,7 @@ def bass_features(h: Harmony, beats: np.ndarray, first: int) -> dict:
     if len(beats) < 12:
         return f
     k = np.arange(len(beats))
-    one = (k - first) % 4 == 0
+    one = (k - first) % meter == 0
     B = _beat_means(h.bass, h.bass_hop_ms, beats)
     C = _beat_means(h.chroma, CHROMA_HOP_MS, beats)
     f["bass_change1"] = _mean_at(_boundary_change(B, 1), one)
@@ -124,7 +124,7 @@ def bass_features(h: Harmony, beats: np.ndarray, first: int) -> dict:
     f["ch_change2"] = _mean_at(_boundary_change(C, 2), one)
     for name, P in (("bass_phrase", B), ("ch_phrase", C)):
         d = _boundary_change(P, 8)
-        f[name] = max(_mean_at(d, (k - first) % 8 == p) for p in (0, 4))
+        f[name] = max(_mean_at(d, (k - first) % (2 * meter) == p) for p in (0, meter))
     fr = (beats[one] / h.bass_hop_ms).astype(int)
     E = h.bass_energy
     rise = [E[i:i + 2].max() - E[i - 2:i].mean() for i in fr if 2 <= i < len(E) - 2]
@@ -247,8 +247,8 @@ def bar_features(o: Onsets, phi: float, L: float, lo: float, hi: float, meter: i
     f["flux_on_one"] = float(o.env[env_idx(starts)].mean() / (o.env[env_idx(beats)].mean() + 1e-9)) if len(starts) else 0.0
     f["chroma_change"] = _chroma_change(None if ch is None else ch.chroma, starts, bar)
     if ch is not None:
-        m0 = int(np.ceil((lo - phi) / L))  # beats[0] is phi + m0 beats: "1" falls on beats[-m0 % 4]
-        f |= bass_features(ch, beats, -m0 % 4)
+        m0 = int(np.ceil((lo - phi) / L))  # beats[0] is phi + m0 beats: "1" falls on beats[-m0 % meter]
+        f |= bass_features(ch, beats, -m0 % meter, meter)
     # song structure: crashes, drops and section entries (the loudest hits) land on "1",
     # and so does the first real hit of the song
     if len(s) >= 20 and len(starts):

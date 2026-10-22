@@ -113,6 +113,15 @@ def ours(path) -> list[Segment]:
         cf = Path(os.environ["RUN_CROSSFIT_DIR"])
         fold = json.loads((cf / "assign.json").read_text()).get(hashlib.md5(Path(path).read_bytes()).hexdigest(), 0)
         T.RUN_TREES = cf / f"fold{fold}.npz"
+    if os.environ.get("METER_CROSSFIT") == "1":  # meter trees (bench/meter_exp.py crossfit); unseen songs: the shipped model
+        import hashlib
+        import json
+
+        from autotiming import meter as Mt
+
+        cf = Path(os.environ.get("METER_CROSSFIT_DIR") or Path(__file__).resolve().parents[1] / "data" / "meter_crossfit")
+        fold = json.loads((cf / "assign.json").read_text()).get(hashlib.md5(Path(path).read_bytes()).hexdigest())
+        Mt.METER_TREES = cf / f"fold{fold}.npz" if fold is not None else Path(Mt.__file__).resolve().parent / "models" / "meter_trees.npz"
     if os.environ.get("AUTOTIMING_FINE", "0") == "1" or os.environ.get("BENCH_ONSET_CACHE", "1") == "0":
         return D.detect(path)
     from cache_onsets import exact_onsets  # D.detect, with onsets from disk when the song was seen
