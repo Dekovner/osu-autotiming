@@ -212,7 +212,15 @@ function refresh() {
   renderSel();
   $("undo").disabled = !past.length;
   $("redo").disabled = !future.length;
+  renderFix();
   draw();
+}
+
+// once the timing differs from the server's, "send fix" lights up and says why it's worth it
+function renderFix() {
+  const b = $("send-fix"), ready = !!songFile && !b.disabled && plain(lines) !== plain(serverLines);
+  b.classList.toggle("ready", ready);
+  $("fix-hint").hidden = !ready;
 }
 
 function renderList() {
@@ -671,7 +679,9 @@ function showNotes(res) {
   if (phaseUncertain) notes.push("<b>beat phase uncertain</b>: if the grid feels on the offbeat, press all −½ (or all +½) above the red lines.");
   if (!notes.length) notes.push("red lines sit on guessed downbeats (the high click): if \"1\" is elsewhere, press all −1 / all +1 above the red lines.");
   const box = $("notes");
-  box.innerHTML = notes.map((n) => `<p>${n}</p>`).join("");
+  box.innerHTML = notes.map((n) => `<p>${n}</p>`).join("") +
+    `<p class="fix-note">wrong somewhere? fix it here, then <button id="to-fix">send fix ↓</button>: ` +
+    "the song and your timing go to auneu, and the songs it gets wrong are what makes it better.</p>";
   box.classList.toggle("unsure", !!(res.downbeat_uncertain && beats) || phaseUncertain || octs.length > 0);
   box.hidden = false;
   box.querySelectorAll(".oct-alt").forEach((b) => (b.onclick = () => {
@@ -679,6 +689,7 @@ function showNotes(res) {
     b.disabled = true;
     b.textContent = done ? "done (ctrl+z undoes it)" : "those red lines are gone";
   }));
+  $("to-fix").onclick = () => $("send-fix").scrollIntoView({ behavior: "smooth", block: "center" });
   const b = $("db-alt");
   if (b) b.onclick = () => { shiftAll(beats, true); b.disabled = true; b.textContent = "moved (ctrl+z undoes it)"; };
 }
@@ -747,7 +758,7 @@ function pasteTiming(text) {
   setLines(got, false);
   firstRef = got[0].time;
   // the notes' buttons are about the analysis, not this timing
-  $("notes").querySelectorAll("button").forEach((b) => (b.disabled = true));
+  $("notes").querySelectorAll("button:not(#to-fix)").forEach((b) => (b.disabled = true));
   status(`pasted ${got.length} red line${got.length > 1 ? "s" : ""} (ctrl+z undoes it)`);
 }
 $("paste").onclick = async () => {
@@ -788,7 +799,7 @@ $("send-fix").onclick = async () => {
   } catch (e) {
     res = { error: "can't reach the server" };
   }
-  if (res.ok) { b.textContent = "sent, thanks!"; b.classList.add("sent"); return; }
+  if (res.ok) { b.textContent = "sent, thanks!"; b.classList.add("sent"); renderFix(); return; }
   b.disabled = false;
   b.textContent = "send fix";
   status(res.error, true);

@@ -16,7 +16,7 @@
 <meta property="og:image:height" content="630">
 <meta name="twitter:card" content="summary_large_image">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="timing.css?v=14">
+<link rel="stylesheet" href="timing.css?v=15">
 </head>
 <body>
 <div class="intro">
@@ -110,12 +110,12 @@
   <div class="out">
     <div class="col-head mono">
       <span>[TimingPoints] red lines</span>
-      <span class="tools"><button id="copy">copy</button><button id="paste" title="replace the red lines with timing points from the clipboard (ctrl+v): lines from an .osu, or a whole .osu">paste</button><button id="send-fix" title="send this song and your corrected timing to auneu: the songs it gets wrong are what makes it better">send fix</button><button id="again" title="load another song">new song</button></span>
+      <span class="tools"><span id="fix-hint" class="fix-hint" hidden>fixed it? send it, that's how it learns →</span><button id="copy">copy</button><button id="paste" title="replace the red lines with timing points from the clipboard (ctrl+v): lines from an .osu, or a whole .osu">paste</button><button id="send-fix" title="send this song and your corrected timing to auneu: the songs it gets wrong are what makes it better">send fix</button><button id="again" title="load another song">new song</button></span>
     </div>
     <textarea id="text" class="mono" readonly spellcheck="false"></textarea>
   </div>
 </section>
 
-<script src="app.js?v=25"></script>
+<script src="app.js?v=26"></script>
 </body>
 </html>

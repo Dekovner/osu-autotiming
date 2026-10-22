@@ -122,7 +122,14 @@ select { padding: 2px 4px; font-family: var(--mono); font-size: 0.78rem; }
 .joint b { color: var(--don); font-weight: 500; }
 
 .out { margin-top: 28px; }
-#send-fix.sent:disabled { opacity: 1; color: var(--kat); }
+/* the way fixes reach the bench set: outlined red like play, filled once the timing was changed */
+#send-fix { border: 1px solid #f04b3c70; color: var(--ink); transition: background .15s, border-color .15s; }
+#send-fix:hover { background: #f04b3c33; }
+#send-fix.ready { background: var(--don); border-color: var(--don); color: #fff; }
+#send-fix.ready:hover { background: #ff5e4f; }
+#send-fix.sent:disabled { opacity: 1; color: var(--kat); border-color: #4598e070; background: none; }
+.fix-hint { margin-right: 8px; font-size: 0.72rem; color: var(--don); }
+@media (max-width: 760px) { .fix-hint { display: none; } }
 /* above the waveform: the grid is judged there, so the doubts must be read there */
 .notes { margin: 0 0 4px; padding: 6px 2px; font-size: 0.75rem; color: var(--muted); }
 .notes p { margin: 0; }
@@ -131,4 +138,6 @@ select { padding: 2px 4px; font-family: var(--mono); font-size: 0.78rem; }
 .notes.unsure { padding: 10px 14px; border-left: 2px solid var(--don); background: #f04b3c14; color: var(--ink); font-size: 0.82rem; }
 .notes button { padding: 1px 6px; border: 1px solid #f04b3c88; color: var(--ink); }
 .notes button:hover { background: #f04b3c33; }
+.notes p.fix-note { color: var(--muted); font-size: 0.75rem; }
+.notes.unsure p.fix-note { margin-top: 8px; }
 textarea { width: 100%; min-height: 9.5em; padding: 10px; font-size: 0.82rem; line-height: 1.5; resize: vertical; color: var(--ink); }
