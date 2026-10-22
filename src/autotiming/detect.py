@@ -1049,9 +1049,13 @@ def splice(steady: list[Segment], hyb: list[Segment], spans) -> list[Segment]:
         """src's lines for [lo, hi): the one in force at lo restarted on its bar nearest lo, but after
         the previous part's last line, then src's own lines inside. A red line starts a bar in osu!,
         and src's lines are on "1": restarting on any other beat put every later "1" a beat or
-        more off (heavy bars 79.7% -> 70.4% when splicing came in)."""
+        more off (heavy bars 79.7% -> 70.4% when splicing came in). No restart when src's own next
+        line comes first or within a bar of the seam: that line opens the part, on "1" already (the
+        restart overtook a 222 at 03:56:773 and dropped it, ranked 2403854). An own line under a bar
+        before hi is a stub the next part takes over (150 26 ms before a tracked span, same map)."""
         src = sorted(src, key=lambda x: x.time)
         starts = [x.time for x in src]
+        own = [x for x in src if lo < x.time < hi and (hi == np.inf or hi - x.time >= x.meter * x.beat_length)]
         out = []
         if lo > -np.inf:
             a = src[max(0, int(np.searchsorted(starts, lo, side="right")) - 1)]
@@ -1059,8 +1063,10 @@ def splice(steady: list[Segment], hyb: list[Segment], spans) -> list[Segment]:
             t0 = a.time + np.round((lo - a.time) / bar) * bar
             while t0 <= after + 1:
                 t0 += bar
-            out.append(Segment(t0, a.beat_length, a.meter))
-        out += [x for x in src if lo < x.time < hi and x.time > (out[-1].time if out else after) + 1]
+            nxt = next((x.time for x in own if x.time > after + 1), np.inf)
+            if nxt - lo >= bar and t0 < nxt - 1:
+                out.append(Segment(t0, a.beat_length, a.meter))
+        out += [x for x in own if x.time > (out[-1].time if out else after) + 1]
         return [x for x in out if x.time < hi]
 
     res, cur = [], -np.inf
