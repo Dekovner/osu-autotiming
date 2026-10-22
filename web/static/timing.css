@@ -140,4 +140,9 @@ select { padding: 2px 4px; font-family: var(--mono); font-size: 0.78rem; }
 .notes button:hover { background: #f04b3c33; }
 .notes p.fix-note { color: var(--muted); font-size: 0.75rem; }
 .notes.unsure p.fix-note { margin-top: 8px; }
+/* an .osu dropped on the page takes its red lines: the box lights up like the drop row */
+.drop-osu { color: var(--muted); opacity: .7; text-transform: none; }
+.out.over .drop-osu { color: var(--don); opacity: 1; }
+.out.over textarea { border-color: var(--don); }
+@media (max-width: 760px) { .drop-osu { display: none; } }
 textarea { width: 100%; min-height: 9.5em; padding: 10px; font-size: 0.82rem; line-height: 1.5; resize: vertical; color: var(--ink); }

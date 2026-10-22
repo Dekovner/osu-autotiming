@@ -696,11 +696,21 @@ function showNotes(res) {
 
 // ---------- wiring ----------
 
-$("file").onchange = (e) => load(e.target.files[0]);
-const dropZone = $("drop");
-["dragenter", "dragover"].forEach((ev) => document.addEventListener(ev, (e) => { e.preventDefault(); dropZone.classList.add("over"); }));
-["dragleave", "drop"].forEach((ev) => document.addEventListener(ev, (e) => { e.preventDefault(); dropZone.classList.remove("over"); }));
-document.addEventListener("drop", (e) => load(e.dataTransfer.files[0]));
+// an .osu brings its red lines (its green ones, the SV, stay out) the way paste does; dropped
+// together with its song (a beatmap folder's audio + .osu) the song loads first, then its timing
+const isOsu = (f) => /\.osu$/i.test(f.name);
+async function openFiles(files) {
+  const osu = files.find(isOsu), song = files.find((f) => !isOsu(f));
+  if (song) await load(song);
+  if (!osu || (song && songFile !== song)) return;  // a song that didn't load keeps its error on screen
+  if (!buffer && !lines.length) { status(`load the song first, then drop ${osu.name} on it`, true); return; }
+  pasteTiming(await osu.text(), osu.name);
+}
+$("file").onchange = (e) => { openFiles([...e.target.files]); e.target.value = ""; };
+const dropZones = [$("drop"), document.querySelector(".out")];
+["dragenter", "dragover"].forEach((ev) => document.addEventListener(ev, (e) => { e.preventDefault(); dropZones.forEach((z) => z.classList.add("over")); }));
+["dragleave", "drop"].forEach((ev) => document.addEventListener(ev, (e) => { e.preventDefault(); dropZones.forEach((z) => z.classList.remove("over")); }));
+document.addEventListener("drop", (e) => openFiles([...e.dataTransfer.files]));
 
 $("play").onclick = () => (playing ? pause() : play());
 $("rate").onchange = (e) => { rate = +e.target.value; if (playing) { pause(); play(); } };
@@ -749,17 +759,20 @@ function parseTiming(text) {
   }
   return out.sort((a, b) => a.time - b.time);
 }
-function pasteTiming(text) {
+function pasteTiming(text, from = null) {
   if (!buffer && !lines.length) return;
   const got = parseTiming(text || "");
-  if (!got.length) { status("no red lines in what you pasted: copy the [TimingPoints] of an .osu (or the whole file)", true); return; }
+  if (!got.length) {
+    status(from ? `no red lines in ${from}` : "no red lines in what you pasted: copy the [TimingPoints] of an .osu (or the whole file)", true);
+    return;
+  }
   commit();
   sel = 0;
   setLines(got, false);
   firstRef = got[0].time;
   // the notes' buttons are about the analysis, not this timing
   $("notes").querySelectorAll("button:not(#to-fix)").forEach((b) => (b.disabled = true));
-  status(`pasted ${got.length} red line${got.length > 1 ? "s" : ""} (ctrl+z undoes it)`);
+  status(`${from ? "took" : "pasted"} ${got.length} red line${got.length > 1 ? "s" : ""}${from ? ` from ${from}` : ""} (ctrl+z undoes it)`);
 }
 $("paste").onclick = async () => {
   let text = null;
