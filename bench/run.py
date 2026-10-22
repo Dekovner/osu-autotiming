@@ -139,6 +139,7 @@ def run_group(method, items):
             try:
                 res = compare(pred, item["truth"], *item["span"])
                 res["pred"] = [[s.time, s.beat_length] for s in pred]
+                res["pred_meter"] = [s.meter for s in pred]
             except Exception as e:
                 res = {"ok": False, "error": f"{type(e).__name__}: {e}", "tb": traceback.format_exc(limit=3)}
         res.update(id=item["id"], tags=item["tags"], secs=secs if k == 0 else 0.0,

@@ -1013,7 +1013,19 @@ def combine(o: Onsets, steady: list[Segment], tracked, anchor: float | None = No
     segs = sorted(lines(o, merged, line_cost=LINE_COST, sigma_ms=LINE_SIGMA_MS, allowed=allowed), key=lambda s: s.time)
     segs = [steady_twin(s, phys) for s in segs]
     if COMBINE_KEEP_STEADY and merged.spans:
-        segs = splice(phys, segs, merged.spans)
+        # the steady parts keep their own lines, each on "1" as in a song that never needed the
+        # tracker: raw steady lines sit a beat or two off the bar as often as not
+        kept = phys
+        if anchor is not None and STEADY_DOWNBEATS:
+            kept = [Segment(s.time - OSU_OFFSET_MS, s.beat_length, s.meter) for s in steady_downbeats(o, steady, anchor, ch)]
+            # the first line too (first_on_downbeat only places the final first line): the steady parts
+            # after a tracked span count their bars from it (heavy 2520502: 200 back a beat off after the
+            # intro ramp). Back to the "1" at or before it, so the song start stays covered
+            f, L = kept[0], kept[0].beat_length
+            if abs((anchor - f.time + L / 2) % L - L / 2) < 10:
+                back = int(np.round((f.time - anchor) / L)) % f.meter
+                kept[0] = Segment(f.time - back * L, L, f.meter)
+        segs = splice(kept, segs, merged.spans)
     if HYBRID_ACCEPT_GAIN >= 0:
         t, w = o.times, weights(o)
         gain4 = piecewise_excess(t, w, segs, tol=4.0) - piecewise_excess(t, w, phys, tol=4.0)
@@ -1031,19 +1043,22 @@ COMBINE_KEEP_STEADY = _env("COMBINE_KEEP_STEADY", "1") == "1"
 
 
 def splice(steady: list[Segment], hyb: list[Segment], spans) -> list[Segment]:
-    """steady's lines outside spans, hyb's inside (onset clock); each part opens on the beat of its
+    """steady's lines outside spans, hyb's inside (onset clock); each part opens on the "1" of its
     own grid nearest the seam."""
     def part(src, lo, hi, after):
-        """src's lines for [lo, hi): the one in force at lo restarted on its beat nearest lo, but after
-        the previous part's last line, then src's own lines inside."""
+        """src's lines for [lo, hi): the one in force at lo restarted on its bar nearest lo, but after
+        the previous part's last line, then src's own lines inside. A red line starts a bar in osu!,
+        and src's lines are on "1": restarting on any other beat put every later "1" a beat or
+        more off (heavy bars 79.7% -> 70.4% when splicing came in)."""
         src = sorted(src, key=lambda x: x.time)
         starts = [x.time for x in src]
         out = []
         if lo > -np.inf:
             a = src[max(0, int(np.searchsorted(starts, lo, side="right")) - 1)]
-            t0 = a.time + np.round((lo - a.time) / a.beat_length) * a.beat_length
+            bar = a.meter * a.beat_length
+            t0 = a.time + np.round((lo - a.time) / bar) * bar
             while t0 <= after + 1:
-                t0 += a.beat_length
+                t0 += bar
             out.append(Segment(t0, a.beat_length, a.meter))
         out += [x for x in src if lo < x.time < hi and x.time > (out[-1].time if out else after) + 1]
         return [x for x in out if x.time < hi]
@@ -1065,6 +1080,8 @@ def splice(steady: list[Segment], hyb: list[Segment], spans) -> list[Segment]:
             if abs(np.log(x.beat_length / p.beat_length)) < 1e-4 and abs(k - round(k)) * p.beat_length < 1:
                 continue
         out.append(x)
+    if len(out) > 1 and out[1].time - out[0].time < out[0].meter * out[0].beat_length:
+        out = out[1:]  # a steady stub of less than a bar before a tracked opening: first_on_downbeat extends it
     return out
 
 
