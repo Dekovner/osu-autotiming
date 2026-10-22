@@ -1,11 +1,14 @@
 # osu-autotiming
 
 Timing for osu! maps from the audio file: BPM, offset and red lines, printed as
-`[TimingPoints]` lines you can paste into the editor.
+`[TimingPoints]` lines you can paste into the editor. Try it at
+[auneu.space/timing](https://auneu.space/timing/).
 
 - one steady grid fitted over the whole song, so the offset is consistent from the first note to the last
 - tempo changes: sections, ramps and ritardandos via a beat tracker that only takes over where a steady grid can't hold the onsets
-- red lines on downbeats, connected to each other (no double barlines), BPMs rounded the way mappers type them (150, not 150.009)
+- red lines on downbeats ("1" from bass, chord changes and hit strength), connected to each other (no double barlines), BPMs rounded the way mappers type them (150, not 150.009)
+- songs in 3: the meter is detected and lines sit on "1" of a bar of 3
+- x2 / x½: trees pick the octave per section, and say so when they're unsure
 - decodes like osu! does (BASS, same MP3 gap handling), so offsets don't shift in game
 
 ## Accuracy
@@ -16,12 +19,28 @@ truth: ±4 ms between mappers is normal, more on hard songs.
 
 | maps (both tools ran on the same 501) | this | Timing Analyzer 0.32.4 |
 |---|---|---|
-| all | 82% / 63% | 73% / 57% |
-| many BPM changes | 67% / 48% | 36% / 25% |
-| a single red line | 88% / 69% | 87% / 69% |
+| all | 87% / 67% | 73% / 57% |
+| many BPM changes | 73% / 54% | 36% / 25% |
+| a single red line | 93% / 74% | 87% / 69% |
 
 Timing Analyzer gave no result on 50 of these maps (mostly multi-BPM ones); they
-count as 0. On single-BPM songs both are at the noise floor of ranked timing.
+count as 0. Where the grid matches the ranked one, 93% of the mapper's barlines are
+"1" in ours too (meter-aware). Every number comes from crossfit runs: no song is
+judged by trees trained on it.
+
+## Site
+
+[auneu.space/timing](https://auneu.space/timing/) (`web/`): drop an mp3, ogg or wav
+(songs up to 15 min, marathons up to 60 min in a queue of their own) and get the red
+lines on a waveform editor:
+
+- playback with a metronome, speed and grid divisor; lines snap to the grid
+- move lines, change BPM in fine steps, shift everything by a beat or half a beat, x2 / x½ where the octave is in doubt
+- paste timing points (ctrl+v) or drop an .osu to compare with an existing map's red lines
+- **send fix**: the song and your corrected timing go to the bench set, which is how the detector learns what it gets wrong
+
+`web/api.py` is the HTTP API behind it (queue, marathon limits, fixes, a usage log
+with visitors as salted IP hashes); `web/static/` is the page.
 
 ## Use
 
@@ -51,6 +70,7 @@ many songs are analysed at once.
 
 ## Benchmark
 
-`bench/` holds the evaluation: `fetch_ranked.py` downloads ranked sets,
-`run.py ranked` runs the detector over them, `baselines.py` wraps librosa,
-essentia and Timing Analyzer for comparison.
+`bench/` holds the evaluation: `fetch_ranked.py` downloads ranked sets (`fetch_heavy.py`
+the ones with many red lines), `run.py ranked|heavy|nominated|feedback|site` runs the
+detector over them, `table.py` compares coverage, `bar_eval.py` checks "1", and
+`baselines.py` wraps librosa, essentia and Timing Analyzer for comparison.
