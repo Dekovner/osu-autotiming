@@ -1012,6 +1012,8 @@ def combine(o: Onsets, steady: list[Segment], tracked, anchor: float | None = No
         allowed = bar_allowed(o, merged.times, phys, anchor, ch)
     segs = sorted(lines(o, merged, line_cost=LINE_COST, sigma_ms=LINE_SIGMA_MS, allowed=allowed), key=lambda s: s.time)
     segs = [steady_twin(s, phys) for s in segs]
+    if COMBINE_KEEP_STEADY and merged.spans:
+        segs = splice(phys, segs, merged.spans)
     if HYBRID_ACCEPT_GAIN >= 0:
         t, w = o.times, weights(o)
         gain4 = piecewise_excess(t, w, segs, tol=4.0) - piecewise_excess(t, w, phys, tol=4.0)
@@ -1019,6 +1021,51 @@ def combine(o: Onsets, steady: list[Segment], tracked, anchor: float | None = No
         if gain4 <= 0 or gain8 <= HYBRID_ACCEPT_GAIN:
             return steady
     return [Segment(s.time + OSU_OFFSET_MS, s.beat_length, s.meter) for s in segs]
+
+
+# Lines from the hybrid beats only where the tracker's beats are: elsewhere the steady lines stay
+# exactly as they were. Compressing the whole song's beats again (lines() with its line cost) merged
+# steady sections a few tenths of a BPM apart: one tracked run at 8-21 s of a song timed in 18 steady
+# lines (2007015, 3 mapsets) left 3 lines and a 75 ms error.
+COMBINE_KEEP_STEADY = _env("COMBINE_KEEP_STEADY", "1") == "1"
+
+
+def splice(steady: list[Segment], hyb: list[Segment], spans) -> list[Segment]:
+    """steady's lines outside spans, hyb's inside (onset clock); each part opens on the beat of its
+    own grid nearest the seam."""
+    def part(src, lo, hi, after):
+        """src's lines for [lo, hi): the one in force at lo restarted on its beat nearest lo, but after
+        the previous part's last line, then src's own lines inside."""
+        src = sorted(src, key=lambda x: x.time)
+        starts = [x.time for x in src]
+        out = []
+        if lo > -np.inf:
+            a = src[max(0, int(np.searchsorted(starts, lo, side="right")) - 1)]
+            t0 = a.time + np.round((lo - a.time) / a.beat_length) * a.beat_length
+            while t0 <= after + 1:
+                t0 += a.beat_length
+            out.append(Segment(t0, a.beat_length, a.meter))
+        out += [x for x in src if lo < x.time < hi and x.time > (out[-1].time if out else after) + 1]
+        return [x for x in out if x.time < hi]
+
+    res, cur = [], -np.inf
+    for a, b in sorted(spans):
+        if a > cur:
+            res += part(steady, cur, a, res[-1].time if res else -np.inf)
+        res += part(hyb, a, b, res[-1].time if res else -np.inf)
+        cur = b
+    res += part(steady, cur, np.inf, res[-1].time if res else -np.inf)
+    out = []
+    for x in sorted(res, key=lambda x: x.time):
+        if out and x.time <= out[-1].time + 1:
+            continue
+        if out:  # a line that only continues the grid before it adds nothing
+            p = out[-1]
+            k = (x.time - p.time) / p.beat_length
+            if abs(np.log(x.beat_length / p.beat_length)) < 1e-4 and abs(k - round(k)) * p.beat_length < 1:
+                continue
+        out.append(x)
+    return out
 
 
 TWIN_TEMPO, TWIN_MS = float(_env("TWIN_TEMPO", "0.002")), 5.0

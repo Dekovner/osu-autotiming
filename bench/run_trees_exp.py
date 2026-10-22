@@ -112,8 +112,11 @@ def one(job):
             sg = beats(steady, lo - 2000, hi + 2000)
             sL = float(np.median(np.diff(sg))) if len(sg) > 1 else tbl
             pq = min(RATIOS, key=lambda x: abs(np.log(tbl / sL * x[1] / x[0])))
-            if abs(np.log(tbl / sL * pq[1] / pq[0])) > 0.03:  # the mapper's tempo here is none of ours
-                continue
+            if abs(np.log(tbl / sL * pq[1] / pq[0])) > 0.03:
+                # a ramp: the mapper's tempo here moves away from the steady grid's; beats against beats
+                if abs(np.log(tbl / sL)) > 0.4:
+                    continue
+                pq = (1, 1)
             p, q = pq
             inside = lambda x: x[(x >= lo) & (x <= hi)]
             tb = inside(split(beats(truth, lo - 2 * tbl, hi + 2 * tbl), p))

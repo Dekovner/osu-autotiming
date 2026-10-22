@@ -29,6 +29,7 @@ class Beats:
     times: np.ndarray  # ms, in the onset clock
     supported: np.ndarray  # bool: an onset backs this beat (else it is interpolated)
     tracked_share: float = 1.0  # after hybrid(): share of steady beats replaced by tracked ones
+    spans: tuple = ()  # after hybrid(): (start, end) ms of each run of tracked beats, onset clock
 
 
 # share of low-band (kick/bass) flux; 0.7 made tracked beats worse in every style
@@ -610,7 +611,7 @@ def hybrid(o, steady: list[Segment], tracked: Beats, margin=HYBRID_MARGIN, third
         use_t[b:e] = True
         k = e
 
-    out_t, out_s, k = [], [], 0
+    out_t, out_s, spans, k = [], [], [], 0
     while k < len(sb):
         if not use_t[k]:
             out_t.append(sb[k])
@@ -621,6 +622,7 @@ def hybrid(o, steady: list[Segment], tracked: Beats, margin=HYBRID_MARGIN, third
         while k2 < len(sb) and use_t[k2]:
             k2 += 1
         a, b = sb[k] - L[k] / 2, sb[k2 - 1] + L[k2 - 1] / 2
+        spans.append((float(a), float(b)))
         sel = (tracked.times >= a) & (tracked.times < b)
         cand, sup = tracked.times[sel], tracked.supported[sel]
         out_t.extend(cand)
@@ -630,7 +632,7 @@ def hybrid(o, steady: list[Segment], tracked: Beats, margin=HYBRID_MARGIN, third
     order = np.argsort(times)
     times, sup = times[order], sup[order]
     keep = np.r_[True, np.diff(times) > 0.4 * np.median(np.diff(times))]  # seams can double a beat
-    return Beats(times[keep], sup[keep], tracked_share=float(use_t.mean()))
+    return Beats(times[keep], sup[keep], tracked_share=float(use_t.mean()), spans=tuple(spans))
 
 
 SMOOTH_LAMBDA = float(__import__("os").environ.get("TRACK_SMOOTH", "30"))  # stiffness of the tempo curve
