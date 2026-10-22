@@ -730,13 +730,25 @@ function showNotes(res) {
       `mappers pick either for songs like this. <button class="oct-alt" data-k="${k}">try ×${a.factor === 2 ? "2" : "½"}` +
       `${all ? " everywhere" : " there"}</button>`);
   });
+  // a song in 3 is a waltz or 4/4 in triplets at 2/3 the tempo, and mappers time it either way:
+  // the server sends the reading it didn't pick, whole (lines, phase and "1" of its own)
+  const tri = (res.triplet_alt || []).map((l) => ({ time: Math.round(l.time), beat_length: l.beat_length, meter: l.meter }));
+  if (tri.length && lines.length) {
+    const longest = (ls) => {
+      const len = (i) => (i + 1 < ls.length ? ls[i + 1].time : duration) - ls[i].time;
+      return ls[ls.reduce((b, _, i) => (len(i) > len(b) ? i : b), 0)];
+    };
+    const read = (ls) => `${fmtBpm(bpmOf(longest(ls)))} BPM in ${longest(ls).meter}/4`;
+    notes.push(`<b>could also be ${read(tri)}, not ${read(lines)}</b>: a waltz and 4/4 in triplets are the same music, ` +
+      `mappers pick either. <button id="tri-alt">try ${fmtBpm(bpmOf(longest(tri)))} BPM</button>`);
+  }
   if (phaseUncertain) notes.push("<b>beat phase uncertain</b>: if the grid feels on the offbeat, press all −½ (or all +½) above the red lines.");
   if (!notes.length) notes.push("red lines sit on guessed downbeats (the high click): if \"1\" is elsewhere, press all −1 / all +1 above the red lines.");
   const box = $("notes");
   box.innerHTML = notes.map((n) => `<p>${n}</p>`).join("") +
     `<p class="fix-note">wrong somewhere? fix it here, then <button id="to-fix">send fix ↓</button>: ` +
     "the song and your timing go to auneu, and the songs it gets wrong are what makes it better.</p>";
-  box.classList.toggle("unsure", !!(res.downbeat_uncertain && beats) || phaseUncertain || octs.length > 0);
+  box.classList.toggle("unsure", !!(res.downbeat_uncertain && beats) || phaseUncertain || octs.length > 0 || tri.length > 0);
   box.hidden = false;
   box.querySelectorAll(".oct-alt").forEach((b) => (b.onclick = () => {
     const k = +b.dataset.k, done = scaleOctave(k, octs[k].factor);
@@ -744,6 +756,16 @@ function showNotes(res) {
     b.textContent = done ? "done (ctrl+z undoes it)" : "those red lines are gone";
   }));
   $("to-fix").onclick = () => $("send-fix").scrollIntoView({ behavior: "smooth", block: "center" });
+  const t = $("tri-alt");
+  if (t) t.onclick = () => {
+    commit();
+    sel = 0;
+    setLines(tri, false);
+    firstRef = tri[0].time;
+    // the other notes' buttons were about the reading the server picked
+    $("notes").querySelectorAll("button:not(#to-fix)").forEach((x) => (x.disabled = true));
+    t.textContent = "done (ctrl+z undoes it)";
+  };
   const b = $("db-alt");
   if (b) b.onclick = () => { shiftAll(beats, true); b.disabled = true; b.textContent = "moved (ctrl+z undoes it)"; };
 }

@@ -9,6 +9,7 @@ GET /job/<id>
    | {"status": "done", "lines": [{"time", "beat_length", "meter"}...], "phase_uncertain", "alt": [...],
       "downbeat_uncertain", "downbeat_alt": beats from "1" to the runner-up "1" (1..3) or null,
       "octave_alts": [{"lines": [index...], "factor": 2 | 0.5}] red lines whose tempo is in doubt,
+      "triplet_alt": [lines] a song in 3 read the other way (waltz vs 4/4 in triplets), or [],
       "duration_ms", "audio_lag_ms", "wave": {"ms_per_px": 1, "min": base64 int8, "max": base64 int8},
       "env": {"ms": 1, "data": base64 uint8}, "seconds"}
 POST /feedback  (multipart: file=<audio>, timing={"original": lines, "fixed": lines, "file", "note"})
@@ -159,6 +160,7 @@ def analyse(path: str, downbeat_ms: float | None, max_minutes: float, marathon_m
         "downbeat_alt": r.downbeat_alt,  # the runner-up "1", in beats after the chosen one
         "octave_alts": r.octave_alts or [],  # tempo x2 / x0.5 in doubt: which red lines, and the factor
         "alt": seg(r.alt_segments or []),
+        "triplet_alt": seg(r.triplet_alt or []),  # in 3: the waltz / triplet reading we didn't pick
         "duration_ms": len(pcm) / sr * 1000,
         "audio_lag_ms": -OSU_OFFSET_MS,  # a red line at t times the attack at t + this in the decode
         "wave": {"ms_per_px": 1, "min": q(mn), "max": q(mx)},

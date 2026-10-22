@@ -731,6 +731,13 @@ TRIPLET_MIN_BAND_GAIN = 0.1  # kick (sub + low) and snare (mid) must each agree
 # true 3:2 maps with many lines still had 40-50%
 TRIPLET_MIN_MAIN_SHARE = float(os.environ.get("TRIPLET_MIN_MAIN_SHARE", "0.35"))
 TRIPLET_TOL_MS = 10.0
+# A waltz is the same music as a 4/4 in triplets (3/4 at 145 and 6/8 at 96.67 share the bar), so
+# where the meter trees hear bars of 3 on the straight grid the 1.5 grid must win by more: the
+# site's Hollow Knight songs (145, 3/4) flipped at 0.235 and 0.198 to 96.67 and 48.33, the ranked
+# maps mapped at 2/3 of the straight tempo gain 0.18-0.59 (5 of 6 over 0.25). No gain separates
+# the two (heavy: 5 waltzes fixed at 0.16-0.22, 3 triplet songs lost at 0.18-0.24, all p(3) >= 0.98),
+# so in 3 the other reading also goes out whole for the page to offer (detect_full, triplet_alt).
+TRIPLET_MIN_GAIN_IN3 = float(os.environ.get("TRIPLET_MIN_GAIN_IN3", "0.25"))
 
 
 def _grid_concentration(t, m, L, phi, tol=TRIPLET_TOL_MS) -> float:
@@ -739,7 +746,8 @@ def _grid_concentration(t, m, L, phi, tol=TRIPLET_TOL_MS) -> float:
     return float(m[d < tol].sum() / (m.sum() + 1e-9) / (2 * tol / L))
 
 
-def triplet_phase(o: Onsets, phi: float, L: float, lo: float, hi: float) -> tuple[float, bool]:
+def triplet_phase(o: Onsets, phi: float, L: float, lo: float, hi: float,
+                  min_gain: float = TRIPLET_MIN_GAIN) -> tuple[float, bool]:
     """For grid (phi, L) in onset time: the best 1.5 L grid's phase, and whether accents favour it."""
     sel = (o.times >= lo) & (o.times < hi)
     if o.profile is None or sel.sum() < MIN_ONSETS:
@@ -753,11 +761,12 @@ def triplet_phase(o: Onsets, phi: float, L: float, lo: float, hi: float) -> tupl
         if j == 0:
             k_best = int(np.argmax(c))
         gains.append(np.log((max(c) + 1e-9) / (_grid_concentration(t, m, L, phi) + 1e-9)))
-    yes = gains[0] > TRIPLET_MIN_GAIN and min(gains[1:]) > TRIPLET_MIN_BAND_GAIN
+    yes = gains[0] > min_gain and min(gains[1:]) > TRIPLET_MIN_BAND_GAIN
     return phi + k_best * L / 2, bool(yes)
 
 
-def triplet_beats(o: Onsets, segs: list[Segment], downbeat_ms: float | None = None) -> tuple[list[Segment], bool]:
+def triplet_beats(o: Onsets, segs: list[Segment], downbeat_ms: float | None = None,
+                  min_gain: float = TRIPLET_MIN_GAIN) -> tuple[list[Segment], bool]:
     """Turn every section into 1.5x-longer beats when the main section's accents fall every 1.5 beats
     (osu! time in and out). A downbeat the user gave picks which third of the new beat is "1".
 
@@ -774,7 +783,7 @@ def triplet_beats(o: Onsets, segs: list[Segment], downbeat_ms: float | None = No
 
     def decide(i):
         lo = starts[i] if i > 0 else o.times[0]
-        return triplet_phase(o, starts[i], segs[i].beat_length, lo, ends[i])
+        return triplet_phase(o, starts[i], segs[i].beat_length, lo, ends[i], min_gain)
 
     song = ends[-1] - min(starts[0], o.times[0])
     if (ends[main] - starts[main]) / song < TRIPLET_MIN_MAIN_SHARE or not decide(main)[1]:
@@ -1210,35 +1219,51 @@ def detect_full(o: Onsets, pcm=None, sr=None, downbeat_ms: float | None = None, 
         segs = combine(o, steady, tracked, anchor, ch)
     plain = segs is steady  # no tracked beats: the lines are the steady sections' own
     # 3:2 last: tracker, hybrid and downbeat model all work on the straight grid they were fitted on
-    segs, triplet = triplet_beats(o, segs, downbeat_ms)
-    if triplet and downbeat_ms is None:  # the old downbeat is on the straight grid: guess again on the new one
-        for k in ("downbeat_unsure", "downbeat_alt"):
-            (info or {}).pop(k, None)
-        anchor = downbeat_anchor(o, segs, ch, info)
-    if info is not None:
-        info["triplet"] = triplet
-        if triplet:  # the octave doubts were about the straight grid
-            info.pop("octave_doubt", None)
-    if plain and STEADY_DOWNBEATS:
-        segs = steady_downbeats(o, segs, anchor, ch)
-    if DROP_AFTER_END:  # nothing left to time: a seam at the song's last beat (site fix 699310c2, 02:54:040)
-        last = o.times[-1] + OSU_OFFSET_MS
-        segs = [s for k, s in enumerate(sorted(segs, key=lambda s: s.time)) if k == 0 or s.time <= last]
-    segs = connect_lines(snap_bpm(first_on_downbeat(segs, anchor, ch, o), o.times[-1] + OSU_OFFSET_MS))
-    if refine and REFINE_JUNK and pcm is not None:
-        segs = refine_junk(o, pcm, sr, segs)
-    if refine and ch is not None:
-        segs = section_phase(o, pcm, sr, ch.chroma, segs)
-    if refine and ch is not None and METER:
-        from .meter import apply_meter
+    straight, in3 = segs, False
+    if ch is not None and METER:
+        from .meter import METER_P, song_meter
 
-        mi = {}
-        segs = apply_meter(o, ch, segs, o.times[-1] + OSU_OFFSET_MS, OSU_OFFSET_MS, mi)
-        if info is not None and mi.get("meter") == 3:  # the "1" doubts were about bars of 4
+        in3 = song_meter(o, ch, segs, o.times[-1] + OSU_OFFSET_MS, OSU_OFFSET_MS) >= METER_P
+    flipped, triplet = triplet_beats(o, straight, downbeat_ms, TRIPLET_MIN_GAIN_IN3 if in3 else TRIPLET_MIN_GAIN)
+
+    def finish(segs, triplet, info, anchor=anchor):
+        if triplet and downbeat_ms is None:  # the old downbeat is on the straight grid: guess again on the new one
             for k in ("downbeat_unsure", "downbeat_alt"):
-                info.pop(k, None)
-    if info is not None:
-        info["octave_alts"] = octave_lines(segs, info.pop("octave_doubt", None), o.times[-1] + OSU_OFFSET_MS)
+                (info or {}).pop(k, None)
+            anchor = downbeat_anchor(o, segs, ch, info)
+        if info is not None:
+            info["triplet"] = triplet
+            if triplet:  # the octave doubts were about the straight grid
+                info.pop("octave_doubt", None)
+        if plain and STEADY_DOWNBEATS:
+            segs = steady_downbeats(o, segs, anchor, ch)
+        if DROP_AFTER_END:  # nothing left to time: a seam at the song's last beat (site fix 699310c2, 02:54:040)
+            last = o.times[-1] + OSU_OFFSET_MS
+            segs = [s for k, s in enumerate(sorted(segs, key=lambda s: s.time)) if k == 0 or s.time <= last]
+        segs = connect_lines(snap_bpm(first_on_downbeat(segs, anchor, ch, o), o.times[-1] + OSU_OFFSET_MS))
+        if refine and REFINE_JUNK and pcm is not None:
+            segs = refine_junk(o, pcm, sr, segs)
+        if refine and ch is not None:
+            segs = section_phase(o, pcm, sr, ch.chroma, segs)
+        if refine and ch is not None and METER:
+            from .meter import apply_meter
+
+            mi = {}
+            segs = apply_meter(o, ch, segs, o.times[-1] + OSU_OFFSET_MS, OSU_OFFSET_MS, mi)
+            if info is not None and mi.get("meter") == 3:  # the "1" doubts were about bars of 4
+                for k in ("downbeat_unsure", "downbeat_alt"):
+                    info.pop(k, None)
+        if info is not None:
+            info["octave_alts"] = octave_lines(segs, info.pop("octave_doubt", None), o.times[-1] + OSU_OFFSET_MS)
+        return segs
+
+    segs = finish(flipped, triplet, info)
+    # in 3 both readings are the same music (a waltz, or 4/4 in triplets at 2/3 the tempo): the
+    # other one goes out whole, for the page to offer
+    if info is not None and in3:
+        other, would = (straight, True) if triplet else triplet_beats(o, straight, downbeat_ms)
+        if would:
+            info["triplet_alt"] = finish(other, not triplet, dict(info))
     return segs
 
 
@@ -1786,6 +1811,7 @@ class Timing:
     downbeat_uncertain: bool = False  # "1" in doubt (downbeat_anchor): show the second guess
     downbeat_alt: int | None = None  # the second guess at "1", in beats after the chosen one (1..3)
     octave_alts: list[dict] | None = None  # {"lines": indices into segments, "factor"}: x2 / x0.5 in doubt
+    triplet_alt: list[Segment] | None = None  # a song in 3: the other reading (waltz vs 4/4 in triplets), whole
 
 
 def analyze(path, downbeat_ms: float | None = None, decoded: tuple[np.ndarray, int] | None = None) -> Timing:
@@ -1800,7 +1826,7 @@ def analyze(path, downbeat_ms: float | None = None, decoded: tuple[np.ndarray, i
     segs = detect_full(o, pcm, sr, downbeat_ms, info)
     alt = [Segment(s.time + s.beat_length / 2, s.beat_length, s.meter) for s in segs]
     bars = dict(downbeat_uncertain=info.get("downbeat_unsure", False), downbeat_alt=info.get("downbeat_alt"),
-                octave_alts=info.get("octave_alts") or [])
+                octave_alts=info.get("octave_alts") or [], triplet_alt=info.get("triplet_alt"))
     if info.get("phase_keep") is not None:
         p = info["phase_keep"]
         return Timing(segs, phase_uncertain=PHASE_UNSURE[0] < p < PHASE_UNSURE[1], alt_segments=alt, **bars)
